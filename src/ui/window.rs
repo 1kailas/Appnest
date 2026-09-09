@@ -186,7 +186,7 @@ impl MainWindow {
                     .website("https://github.com/1kailas/appnest")
                     .issue_url("https://github.com/1kailas/appnest/issues")
                     .copyright("© 2026 1kailas")
-                    .license_type(gtk4::License::MitX11)
+                    .license_type(gtk4::License::Gpl30)
                     .build();
                 about.present(Some(&win));
             }

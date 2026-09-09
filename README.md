@@ -2,7 +2,7 @@
 
 A clean, modern Linux desktop application for managing, organizing, integrating, and launching AppImages. Built in **Rust** with **GTK4** and **Libadwaita** following **Clean Architecture**.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: Linux](https://img.shields.io/badge/Platform-Linux-orange.svg)]()
 [![Desktop: GNOME / Libadwaita](https://img.shields.io/badge/UI-GTK4%20%2F%20Libadwaita-brightgreen.svg)]()
 
@@ -128,4 +128,4 @@ appstreamcli validate --no-net resources/io.github._1kailas.AppNest.metainfo.xml
 
 ## 📄 License
 
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the **GNU General Public License v3.0 (GPL-3.0-or-later)** - see the [LICENSE](LICENSE) file for details.

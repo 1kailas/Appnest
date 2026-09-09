@@ -3,7 +3,7 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Modern AppImage manager built with Rust, GTK4, and Libadwaita
 
-License:        MIT
+License:        GPL-3.0-or-later
 URL:            https://github.com/1kailas/appnest
 Source0:        https://github.com/1kailas/%{name}/archive/v%{version}/%{name}-%{version}.tar.gz
 
