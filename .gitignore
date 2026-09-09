@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs and temporary files
+*.log
+*.tmp
+scratch/
+.system_generated/
+
+# Packaging build artifacts
+*.rpm
+*.tar.gz
+rpmbuild/

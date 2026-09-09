@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <requires lib="libadwaita" version="1.0"/>
+  <object class="AdwAlertDialog" id="import_dialog">
+    <property name="heading" translatable="yes">Import AppImage</property>
+    <property name="body" translatable="yes">Choose how you want to manage this AppImage.</property>
+  </object>
+</interface>

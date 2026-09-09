@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/_1kailas/AppNest">
+    <file compressed="true">styles/style.css</file>
+    <file compressed="true">icons/io.github._1kailas.AppNest.svg</file>
+    <file compressed="true">ui/window.ui</file>
+    <file compressed="true">ui/app_row.ui</file>
+    <file compressed="true">ui/app_details.ui</file>
+    <file compressed="true">ui/preferences.ui</file>
+    <file compressed="true">ui/import_dialog.ui</file>
+  </gresource>
+</gresources>

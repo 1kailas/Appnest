@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <requires lib="libadwaita" version="1.0"/>
+  <template class="MainWindow" parent="AdwApplicationWindow">
+    <property name="title" translatable="yes">AppNest</property>
+    <property name="default-width">960</property>
+    <property name="default-height">640</property>
+    <property name="content">
+      <object class="AdwToastOverlay" id="toast_overlay">
+        <property name="child">
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <child>
+              <object class="AdwHeaderBar">
+                <child type="start">
+                  <object class="GtkButton" id="add_btn">
+                    <property name="icon-name">list-add-symbolic</property>
+                    <property name="tooltip-text" translatable="yes">Add AppImage</property>
+                  </object>
+                </child>
+                <child type="start">
+                  <object class="GtkButton" id="refresh_btn">
+                    <property name="icon-name">view-refresh-symbolic</property>
+                    <property name="tooltip-text" translatable="yes">Refresh Applications</property>
+                  </object>
+                </child>
+                <child type="end">
+                  <object class="GtkMenuButton" id="menu_btn">
+                    <property name="icon-name">open-menu-symbolic</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <child>
+              <object class="GtkPaned" id="paned">
+                <property name="orientation">horizontal</property>
+                <property name="position">340</property>
+                <property name="wide-handle">true</property>
+                <property name="hexpand">true</property>
+                <property name="vexpand">true</property>
+              </object>
+            </child>
+          </object>
+        </property>
+      </object>
+    </property>
+  </template>
+</interface>

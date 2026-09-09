@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=AppNest
+GenericName=AppImage Manager
+Comment=Manage, integrate, and launch AppImages
+Exec=appnest
+Icon=io.github._1kailas.AppNest
+Terminal=false
+Categories=Utility;PackageManager;
+Keywords=AppImage;Package;Manager;Installer;SquashFS;AppNest;
+StartupNotify=true
+StartupWMClass=appnest

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github._1kailas.AppNest</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>AppNest</name>
+  <summary>A clean, modern AppImage manager built with Rust, GTK4, and Libadwaita</summary>
+  <description>
+    <p>
+      AppNest is a high-performance Linux desktop application for managing,
+      organizing, integrating, and launching AppImages.
+    </p>
+    <p>
+      Key features include an adaptive runtime execution engine (Direct Native, FUSE,
+      and SquashFS Extracted fallback), drag-and-drop file import, SHA-256 checksum
+      verification, and full GNOME Libadwaita desktop integration.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github._1kailas.AppNest.desktop</launchable>
+  <url type="homepage">https://github.com/1kailas/appnest</url>
+  <url type="bugtracker">https://github.com/1kailas/appnest/issues</url>
+  <url type="vcs-browser">https://github.com/1kailas/appnest</url>
+  <developer id="io.github._1kailas">
+    <name>1kailas</name>
+  </developer>
+  <provides>
+    <binary>appnest</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-09-09">
+      <description>
+        <p>Initial release of AppNest with adaptive runtime, drag-and-drop, and Libadwaita UI.</p>
+      </description>
+    </release>
+  </releases>
+</component>
