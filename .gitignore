@@ -17,5 +17,7 @@ scratch/
 
 # Packaging build artifacts
 *.rpm
+*.deb
 *.tar.gz
 rpmbuild/
+dist/
