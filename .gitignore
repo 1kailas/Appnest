@@ -19,5 +19,6 @@ scratch/
 *.rpm
 *.deb
 *.tar.gz
+!vendor/**
 rpmbuild/
 dist/
