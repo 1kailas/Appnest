@@ -110,7 +110,24 @@ cargo test
 
 ---
 
-## 📦 Packaging (Fedora / DNF / Copr)
+## 📦 Packaging
+
+### Arch Linux (AUR)
+
+Install with your preferred AUR helper:
+```bash
+yay -S appnest
+# or
+paru -S appnest
+```
+
+Or build and install manually with `makepkg`:
+```bash
+cd packaging/aur
+makepkg -si
+```
+
+### Fedora / DNF / Copr
 
 AppNest includes spec and metadata files strictly adhering to Fedora Packaging Guidelines:
 * Spec file: `packaging/rpm/appnest.spec`

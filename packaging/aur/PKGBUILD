@@ -1,0 +1,52 @@
+# Maintainer: Kailasnath T <00kailas000@gmail.com>
+pkgname=appnest
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A clean, modern AppImage manager built with Rust, GTK4, and Libadwaita"
+arch=('x86_64' 'aarch64')
+url="https://github.com/1kailas/Appnest"
+license=('GPL-3.0-or-later')
+depends=(
+	'gcc-libs'
+	'glibc'
+	'gtk4'
+	'hicolor-icon-theme'
+	'libadwaita'
+	'p7zip'
+)
+makedepends=(
+	'cargo'
+)
+optdepends=(
+	'squashfs-tools: for extracting SquashFS AppRun fallback'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('6f26a58f65659056514ce880a7f7005e283ff9f864e549b05a7c343763b74b53')
+
+prepare() {
+	cd "Appnest-$pkgver"
+	export RUSTUP_TOOLCHAIN=stable
+	cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+	cd "Appnest-$pkgver"
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	cargo build --frozen --release --all-features
+}
+
+check() {
+	cd "Appnest-$pkgver"
+	export RUSTUP_TOOLCHAIN=stable
+	cargo test --frozen --all-features
+}
+
+package() {
+	cd "Appnest-$pkgver"
+	install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+	install -Dm644 "resources/icons/io.github._1kailas.AppNest.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github._1kailas.AppNest.svg"
+	install -Dm644 "packaging/io.github._1kailas.AppNest.desktop" "$pkgdir/usr/share/applications/io.github._1kailas.AppNest.desktop"
+	install -Dm644 "resources/io.github._1kailas.AppNest.metainfo.xml" "$pkgdir/usr/share/metainfo/io.github._1kailas.AppNest.metainfo.xml"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

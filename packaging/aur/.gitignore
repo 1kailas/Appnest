@@ -1,0 +1,7 @@
+appnest-*/
+pkg/
+src/
+*.tar.gz
+*.tar.xz
+*.pkg.tar.zst
+*.pkg.tar.gz
