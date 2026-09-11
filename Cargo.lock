@@ -30,6 +30,7 @@ dependencies = [
  "gtk4",
  "infer",
  "libadwaita",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

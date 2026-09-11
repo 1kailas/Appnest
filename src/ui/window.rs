@@ -1,5 +1,6 @@
 use crate::application::commands::{
-    ImportAppImageCommand, LaunchAppImageCommand, RemoveAppImageCommand, UpdateAppImageCommand,
+    CloseAppImageCommand, ImportAppImageCommand, LaunchAppImageCommand, RemoveAppImageCommand,
+    UpdateAppImageCommand,
 };
 use crate::application::queries::{AppImagesListing, ListAppImagesQuery};
 use crate::config::paths::AppPaths;
@@ -29,6 +30,7 @@ use libadwaita::{
     Toast, ToastOverlay,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -38,6 +40,7 @@ struct ControllerState {
     filtered_apps: Vec<AppImage>,
     unmanaged: Vec<PathBuf>,
     selected_id: Option<String>,
+    row_widgets: HashMap<String, Rc<AppRowWidget>>,
 }
 
 pub struct MainWindow {
@@ -55,8 +58,19 @@ impl MainWindow {
         let launcher = Arc::new(AppImageLauncher::new(paths.clone()));
 
         let import_cmd = Arc::new(ImportAppImageCommand::new(Arc::clone(&repo), importer));
-        let remove_cmd = Arc::new(RemoveAppImageCommand::new(Arc::clone(&repo), paths.clone()));
-        let launch_cmd = Arc::new(LaunchAppImageCommand::new(Arc::clone(&repo), launcher));
+        let remove_cmd = Arc::new(RemoveAppImageCommand::new(
+            Arc::clone(&repo),
+            paths.clone(),
+            Arc::clone(&launcher),
+        ));
+        let launch_cmd = Arc::new(LaunchAppImageCommand::new(
+            Arc::clone(&repo),
+            Arc::clone(&launcher),
+        ));
+        let close_cmd = Arc::new(CloseAppImageCommand::new(
+            Arc::clone(&repo),
+            Arc::clone(&launcher),
+        ));
         let update_cmd = Arc::new(UpdateAppImageCommand::new(Arc::clone(&repo), paths.clone()));
         let list_query = Arc::new(ListAppImagesQuery::new(Arc::clone(&repo)));
 
@@ -65,7 +79,9 @@ impl MainWindow {
             filtered_apps: Vec::new(),
             unmanaged: Vec::new(),
             selected_id: None,
+            row_widgets: HashMap::new(),
         }));
+
 
         // Prevents signal handler loops when programmatically updating widgets
         let is_updating = Rc::new(Cell::new(false));
@@ -203,6 +219,7 @@ impl MainWindow {
             let right_stack = right_stack.clone();
             let toast_overlay = toast_overlay.clone();
             let launch_cmd = Arc::clone(&launch_cmd);
+            let close_cmd = Arc::clone(&close_cmd);
             let import_cmd = Arc::clone(&import_cmd);
             let is_updating = Rc::clone(&is_updating);
             let paths_for_refresh = paths.clone();
@@ -273,33 +290,81 @@ impl MainWindow {
                     listbox.remove(&row);
                 }
 
+                let mut row_map = HashMap::new();
                 for app in &filtered_apps {
-                    let row_widget = AppRowWidget::new(app);
+                    let row_widget = Rc::new(AppRowWidget::new(app));
                     let app_id = app.id.clone();
                     let app_name = app.name.clone();
 
-                    // Connect quick launch button
+                    row_widget.set_running_state(close_cmd.is_running(&app_id));
+
+                    // Connect quick launch / close button
                     let launch_cmd_clone = Arc::clone(&launch_cmd);
+                    let close_cmd_clone = Arc::clone(&close_cmd);
                     let toast_overlay_clone = toast_overlay.clone();
+                    let row_widget_clone = Rc::clone(&row_widget);
+                    let app_details_widget_clone = Rc::clone(&app_details_widget);
+                    let state_clone = Rc::clone(&state);
+                    let app_id_c = app_id.clone();
+                    let app_name_c = app_name.clone();
+
                     row_widget.launch_button.connect_clicked(move |_| {
-                        match launch_cmd_clone.execute(&app_id, &[]) {
-                            Ok(pid) => {
-                                toast_overlay_clone.add_toast(Toast::new(&format!(
-                                    "Launched {} (PID: {})",
-                                    app_name, pid
-                                )));
+                        let is_running = close_cmd_clone.is_running(&app_id_c);
+                        if is_running {
+                            match close_cmd_clone.execute(&app_id_c) {
+                                Ok(_) => {
+                                    toast_overlay_clone.add_toast(Toast::new(&format!(
+                                        "Closed {}",
+                                        app_name_c
+                                    )));
+                                    row_widget_clone.set_running_state(false);
+                                    if state_clone.borrow().selected_id.as_deref()
+                                        == Some(&app_id_c)
+                                    {
+                                        app_details_widget_clone
+                                            .borrow()
+                                            .set_running_state(false);
+                                    }
+                                }
+                                Err(e) => {
+                                    toast_overlay_clone.add_toast(Toast::new(&format!(
+                                        "Failed to close {}: {}",
+                                        app_name_c, e
+                                    )));
+                                }
                             }
-                            Err(e) => {
-                                toast_overlay_clone.add_toast(Toast::new(&format!(
-                                    "Failed to launch {}: {}",
-                                    app_name, e
-                                )));
+                        } else {
+                            match launch_cmd_clone.execute(&app_id_c, &[]) {
+                                Ok(pid) => {
+                                    toast_overlay_clone.add_toast(Toast::new(&format!(
+                                        "Launched {} (PID: {})",
+                                        app_name_c, pid
+                                    )));
+                                    row_widget_clone.set_running_state(true);
+                                    if state_clone.borrow().selected_id.as_deref()
+                                        == Some(&app_id_c)
+                                    {
+                                        app_details_widget_clone
+                                            .borrow()
+                                            .set_running_state(true);
+                                    }
+                                }
+                                Err(e) => {
+                                    toast_overlay_clone.add_toast(Toast::new(&format!(
+                                        "Failed to launch {}: {}",
+                                        app_name_c, e
+                                    )));
+                                }
                             }
                         }
                     });
 
+                    row_map.insert(app_id, Rc::clone(&row_widget));
                     listbox.append(&row_widget.row);
                 }
+
+                state.borrow_mut().row_widgets = row_map;
+
 
                 // Populate discovered unmanaged list safely
                 let discovered_list = &app_list_widget.borrow().discovered_list;
@@ -396,8 +461,12 @@ impl MainWindow {
                 if let Some(ref found) = found_app {
                     is_updating.set(true);
                     app_details_widget.borrow_mut().update(found);
+                    app_details_widget
+                        .borrow()
+                        .set_running_state(close_cmd.is_running(&found.id));
                     is_updating.set(false);
                     right_stack.set_visible_child_name("details");
+
 
                     // Visually highlight row in listbox
                     if let Some(pos) = filtered_apps.iter().position(|a| a.id == found.id) {
@@ -434,6 +503,7 @@ impl MainWindow {
             let is_updating = Rc::clone(&is_updating);
             let paths_for_select = paths.clone();
             let repo_for_select = Arc::clone(&repo);
+            let close_cmd = Arc::clone(&close_cmd);
 
             app_list_widget
                 .borrow()
@@ -464,6 +534,9 @@ impl MainWindow {
                             }
                             is_updating.set(true);
                             app_details_widget.borrow_mut().update(&app);
+                            app_details_widget
+                                .borrow()
+                                .set_running_state(close_cmd.is_running(&app.id));
                             is_updating.set(false);
                             right_stack.set_visible_child_name("details");
                         }
@@ -471,17 +544,17 @@ impl MainWindow {
                 });
         }
 
-        // Connect Details: Launch Button
+        // Connect Details: Launch / Close Button
         {
             let state = Rc::clone(&state);
             let launch_cmd = Arc::clone(&launch_cmd);
+            let close_cmd = Arc::clone(&close_cmd);
             let toast_overlay = toast_overlay.clone();
-            let r_fn = Rc::clone(&refresh_list_fn);
+            let app_details_widget = Rc::clone(&app_details_widget);
+            let launch_btn = app_details_widget.borrow().launch_btn.clone();
 
-            app_details_widget
-                .borrow()
-                .launch_btn
-                .connect_clicked(move |_| {
+            launch_btn.connect_clicked(move |_| {
+
                     let selected = {
                         let st = state.borrow();
                         st.selected_id.as_ref().and_then(|id| {
@@ -493,24 +566,78 @@ impl MainWindow {
                     };
 
                     if let Some((app_id, app_name)) = selected {
-                        match launch_cmd.execute(&app_id, &[]) {
-                            Ok(pid) => {
-                                toast_overlay.add_toast(Toast::new(&format!(
-                                    "Launched {} (PID: {})",
-                                    app_name, pid
-                                )));
-                                r_fn();
+                        let is_running = close_cmd.is_running(&app_id);
+                        if is_running {
+                            match close_cmd.execute(&app_id) {
+                                Ok(_) => {
+                                    toast_overlay.add_toast(Toast::new(&format!(
+                                        "Closed {}",
+                                        app_name
+                                    )));
+                                    app_details_widget.borrow().set_running_state(false);
+                                    let st = state.borrow();
+                                    if let Some(row_widget) = st.row_widgets.get(&app_id) {
+                                        row_widget.set_running_state(false);
+                                    }
+                                }
+                                Err(e) => {
+                                    toast_overlay.add_toast(Toast::new(&format!(
+                                        "Failed to close {}: {}",
+                                        app_name, e
+                                    )));
+                                }
                             }
-                            Err(e) => {
-                                toast_overlay.add_toast(Toast::new(&format!(
-                                    "Launch error for {}: {}",
-                                    app_name, e
-                                )));
+                        } else {
+                            match launch_cmd.execute(&app_id, &[]) {
+                                Ok(pid) => {
+                                    toast_overlay.add_toast(Toast::new(&format!(
+                                        "Launched {} (PID: {})",
+                                        app_name, pid
+                                    )));
+                                    app_details_widget.borrow().set_running_state(true);
+                                    let st = state.borrow();
+                                    if let Some(row_widget) = st.row_widgets.get(&app_id) {
+                                        row_widget.set_running_state(true);
+                                    }
+                                }
+                                Err(e) => {
+                                    toast_overlay.add_toast(Toast::new(&format!(
+                                        "Launch error for {}: {}",
+                                        app_name, e
+                                    )));
+                                }
                             }
                         }
                     }
                 });
         }
+
+        // Periodic running status watcher (syncs button states every second)
+        {
+            let state = Rc::clone(&state);
+            let close_cmd = Arc::clone(&close_cmd);
+            let app_details_widget = Rc::clone(&app_details_widget);
+
+            glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
+                let (selected_id, row_widgets) = {
+                    let st = state.borrow();
+                    (st.selected_id.clone(), st.row_widgets.clone())
+                };
+
+                if let Some(ref id) = selected_id {
+                    let running = close_cmd.is_running(id);
+                    app_details_widget.borrow().set_running_state(running);
+                }
+
+                for (id, row_widget) in row_widgets {
+                    let running = close_cmd.is_running(&id);
+                    row_widget.set_running_state(running);
+                }
+
+                glib::ControlFlow::Continue
+            });
+        }
+
 
         // Connect Details: Reveal File Button
         {

@@ -52,6 +52,11 @@ impl AppManagerApplication {
         let config_store_clone = Arc::clone(&config_store);
 
         app.connect_activate(move |app| {
+            if let Some(win) = app.active_window() {
+                win.present();
+                return;
+            }
+
             let main_window = MainWindow::new(
                 app,
                 paths_clone.clone(),
@@ -60,6 +65,7 @@ impl AppManagerApplication {
             );
             main_window.window.present();
         });
+
 
         Self { app }
     }

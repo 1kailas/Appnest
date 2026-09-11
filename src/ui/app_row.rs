@@ -3,11 +3,13 @@ use gtk4::prelude::*;
 use gtk4::{Box, Button, Image, Label, Orientation};
 use libadwaita::prelude::*;
 use libadwaita::ActionRow;
+use std::cell::Cell;
 
 pub struct AppRowWidget {
     pub row: ActionRow,
     pub launch_button: Button,
     pub app_id: String,
+    pub is_running: Cell<bool>,
 }
 
 impl AppRowWidget {
@@ -57,7 +59,7 @@ impl AppRowWidget {
         arch_label.add_css_class("badge-info");
         suffix_box.append(&arch_label);
 
-        // Quick launch button
+        // Quick launch / close button
         let launch_button = Button::builder()
             .icon_name("media-playback-start-symbolic")
             .valign(gtk4::Align::Center)
@@ -72,6 +74,26 @@ impl AppRowWidget {
             row,
             launch_button,
             app_id: app.id.clone(),
+            is_running: Cell::new(false),
+        }
+    }
+
+    pub fn set_running_state(&self, running: bool) {
+        if self.is_running.get() == running {
+            return;
+        }
+        self.is_running.set(running);
+        if running {
+            self.launch_button.set_icon_name("window-close-symbolic");
+            self.launch_button.set_tooltip_text(Some("Close Application"));
+            self.launch_button.remove_css_class("flat");
+            self.launch_button.add_css_class("destructive-action");
+        } else {
+            self.launch_button.set_icon_name("media-playback-start-symbolic");
+            self.launch_button.set_tooltip_text(Some("Launch Application"));
+            self.launch_button.remove_css_class("destructive-action");
+            self.launch_button.add_css_class("flat");
         }
     }
 }
+

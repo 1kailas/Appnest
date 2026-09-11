@@ -28,7 +28,9 @@ pub struct AppDetailsWidget {
     pub compute_hash_btn: Button,
     pub copy_hash_btn: Button,
     pub current_app_id: Option<String>,
+    pub is_running: std::cell::Cell<bool>,
 }
+
 
 impl AppDetailsWidget {
     pub fn new() -> Self {
@@ -264,8 +266,10 @@ impl AppDetailsWidget {
             compute_hash_btn,
             copy_hash_btn,
             current_app_id: None,
+            is_running: std::cell::Cell::new(false),
         }
     }
+
 
     pub fn update(&mut self, app: &AppImage) {
         self.current_app_id = Some(app.id.clone());
@@ -369,4 +373,23 @@ impl AppDetailsWidget {
             self.extract_btn.set_label("Extract AppDir");
         }
     }
+
+    pub fn set_running_state(&self, running: bool) {
+        self.is_running.set(running);
+        if running {
+            self.launch_btn.set_label("Close");
+            self.launch_btn.set_icon_name("window-close-symbolic");
+            self.launch_btn.remove_css_class("suggested-action");
+            self.launch_btn.add_css_class("destructive-action");
+            self.launch_btn
+                .set_tooltip_text(Some("Close running application"));
+        } else {
+            self.launch_btn.set_label("Launch");
+            self.launch_btn.set_icon_name("media-playback-start-symbolic");
+            self.launch_btn.remove_css_class("destructive-action");
+            self.launch_btn.add_css_class("suggested-action");
+            self.launch_btn.set_tooltip_text(Some("Launch application"));
+        }
+    }
 }
+

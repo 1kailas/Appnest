@@ -9,10 +9,10 @@ impl DesktopEntryService {
     pub fn create_entry(app: &AppImage, desktop_dir: &Path) -> Result<PathBuf, AppImageError> {
         let dest = desktop_dir.join(format!("{}.desktop", app.id));
 
-        // Determine executable path
-        let exec_target = match app.runtime_method {
+        // Determine executable path and arguments
+        let mut exec_line = match app.runtime_method {
             RuntimeMethod::Extracted => {
-                if let Some(apprun) = app.apprun_path() {
+                let target = if let Some(apprun) = app.apprun_path() {
                     if apprun.exists() {
                         apprun
                     } else {
@@ -20,13 +20,18 @@ impl DesktopEntryService {
                     }
                 } else {
                     app.path.clone()
-                }
+                };
+                format!("\"{}\"", target.display())
+            }
+            RuntimeMethod::Fuse => {
+                format!("\"{}\" --appimage-extract-and-run", app.path.display())
             }
             _ => {
                 if app.is_extracted() {
-                    app.apprun_path().unwrap_or_else(|| app.path.clone())
+                    let target = app.apprun_path().unwrap_or_else(|| app.path.clone());
+                    format!("\"{}\"", target.display())
                 } else {
-                    app.path.clone()
+                    format!("\"{}\"", app.path.display())
                 }
             }
         };
@@ -46,14 +51,12 @@ impl DesktopEntryService {
             .exec_args
             .as_ref()
             .map_or(false, |a| a.contains("--no-sandbox"));
-        if needs_no_sandbox {
-            lines.push(format!(
-                "Exec=\"{}\" --no-sandbox %U",
-                exec_target.display()
-            ));
-        } else {
-            lines.push(format!("Exec=\"{}\" %U", exec_target.display()));
+        if needs_no_sandbox && !exec_line.contains("--no-sandbox") {
+            exec_line.push_str(" --no-sandbox");
         }
+        exec_line.push_str(" %U");
+        lines.push(format!("Exec={}", exec_line));
+
 
         if let Some(ref icon) = app.icon_path {
             lines.push(format!("Icon={}", icon.display()));

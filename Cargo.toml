@@ -28,6 +28,7 @@ tempfile = "3.12"
 infer = "0.16"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 async-channel = "2.3"
+libc = "0.2"
 
 [package.metadata.generate-rpm]
 assets = [

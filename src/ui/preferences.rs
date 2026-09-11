@@ -53,9 +53,13 @@ impl PreferencesWindow {
 
         let copy_switch = SwitchRow::builder()
             .title("Copy to Managed Storage")
-            .subtitle("Store imported AppImages in ~/.local/share/appimage-manager/applications")
+            .subtitle(format!(
+                "Store imported AppImages in {}",
+                paths.applications_dir.display()
+            ))
             .active(current_settings.copy_on_import)
             .build();
+
         paths_group.add(&copy_switch);
 
         let desktop_switch = SwitchRow::builder()
