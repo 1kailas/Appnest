@@ -9,4 +9,3 @@ pub use import_appimage::ImportAppImageCommand;
 pub use launch_appimage::LaunchAppImageCommand;
 pub use remove_appimage::RemoveAppImageCommand;
 pub use update_appimage::UpdateAppImageCommand;
-

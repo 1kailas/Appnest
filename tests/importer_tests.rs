@@ -105,3 +105,45 @@ fn test_obsidian_icon_extraction() {
         assert!(icon.unwrap().exists());
     }
 }
+
+#[test]
+fn test_appimage_import_and_desktop_integration() {
+    let tmp = tempdir().unwrap();
+    let mut paths = AppPaths::new();
+    paths.database_file = tmp.path().join("apps.toml");
+    paths.applications_dir = tmp.path().join("applications");
+    paths.desktop_applications_dir = tmp.path().join("desktop_entries");
+    paths.icons_dir = tmp.path().join("icons");
+    let _ = paths.ensure_dirs();
+
+    let repo = FilesystemAppImageRepository::new(paths.clone());
+
+    // Create a mock executable AppImage
+    let app_src = tmp.path().join("my-test-app.AppImage");
+    {
+        use std::io::Write;
+        let mut f = File::create(&app_src).unwrap();
+        let mut content = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0];
+        content.extend_from_slice(&[b'A', b'I', 0x02]);
+        content.resize(128, 0);
+        f.write_all(&content).unwrap();
+    }
+
+    let importer = appnest::services::importer::AppImageImporter::new(paths.clone());
+    let mut settings = appnest::config::settings::AppSettings::default();
+    settings.auto_integrate_desktop = true;
+    settings.copy_on_import = false;
+
+    let imported = importer.import(&app_src, &settings).unwrap();
+    assert_eq!(imported.name, "my-test-app");
+    assert!(imported.desktop_integrated);
+    assert!(imported.desktop_entry_path.is_some());
+    assert!(imported.desktop_entry_path.as_ref().unwrap().exists());
+
+    // Save in repo
+    repo.save(&imported).unwrap();
+    let listed = repo.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, imported.id);
+    assert!(listed[0].desktop_integrated);
+}

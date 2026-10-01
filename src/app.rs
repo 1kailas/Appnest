@@ -3,11 +3,15 @@ use crate::config::settings::ThemePreference;
 use crate::domain::repository::AppImageRepository;
 use crate::infrastructure::config_store::ConfigStore;
 use crate::infrastructure::filesystem_repository::FilesystemAppImageRepository;
+use crate::services::desktop_entry::DesktopEntryService;
 use crate::ui::window::MainWindow;
 use gtk4::gdk::Display;
+use gtk4::gio::ApplicationFlags;
 use gtk4::prelude::*;
 use gtk4::CssProvider;
 use libadwaita::{Application, ColorScheme, StyleManager};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub struct AppManagerApplication {
@@ -24,6 +28,7 @@ impl AppManagerApplication {
     pub fn new() -> Self {
         let app = Application::builder()
             .application_id("io.github._1kailas.AppNest")
+            .flags(ApplicationFlags::HANDLES_OPEN)
             .build();
 
         let paths = AppPaths::new();
@@ -45,27 +50,55 @@ impl AppManagerApplication {
             let settings = config_store_for_startup.load();
             Self::apply_theme(settings.theme);
             Self::load_styles();
+            // Run MIME registration in background to avoid blocking startup
+            std::thread::spawn(|| {
+                DesktopEntryService::ensure_mime_integration();
+            });
         });
 
-        let paths_clone = paths.clone();
-        let repo_clone = Arc::clone(&repo);
-        let config_store_clone = Arc::clone(&config_store);
+        let main_window_cell: Rc<RefCell<Option<Rc<MainWindow>>>> = Rc::new(RefCell::new(None));
 
-        app.connect_activate(move |app| {
-            if let Some(win) = app.active_window() {
-                win.present();
-                return;
+        let get_or_create_window = {
+            let main_window_cell = Rc::clone(&main_window_cell);
+            let paths = paths.clone();
+            let repo = Arc::clone(&repo);
+            let config_store = Arc::clone(&config_store);
+
+            move |app: &Application| -> Rc<MainWindow> {
+                let mut cell = main_window_cell.borrow_mut();
+                if let Some(ref win) = *cell {
+                    if win.window.is_visible() {
+                        return Rc::clone(win);
+                    }
+                }
+                let win = Rc::new(MainWindow::new(
+                    app,
+                    paths.clone(),
+                    Arc::clone(&repo),
+                    Arc::clone(&config_store),
+                ));
+                *cell = Some(Rc::clone(&win));
+                win
             }
+        };
 
-            let main_window = MainWindow::new(
-                app,
-                paths_clone.clone(),
-                Arc::clone(&repo_clone),
-                Arc::clone(&config_store_clone),
-            );
-            main_window.window.present();
+        let get_win_activate = get_or_create_window.clone();
+        app.connect_activate(move |app| {
+            let win = get_win_activate(app);
+            win.window.present();
         });
 
+        let get_win_open = get_or_create_window.clone();
+        app.connect_open(move |app, files, _hint| {
+            let win = get_win_open(app);
+            win.window.present();
+
+            for file in files {
+                if let Some(path) = file.path() {
+                    win.prompt_open_file(path);
+                }
+            }
+        });
 
         Self { app }
     }

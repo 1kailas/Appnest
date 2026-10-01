@@ -21,13 +21,13 @@ use gtk4::gdk;
 use gtk4::gio::{self, SimpleAction};
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box, Button, DropTarget, FileChooserAction, FileChooserNative, FileFilter, MenuButton,
+    Box, Button, DropTarget, FileChooserAction, FileChooserNative, FileFilter, MenuButton,
     Orientation, Paned, ResponseType, Stack,
 };
 use libadwaita::prelude::*;
 use libadwaita::{
-    AboutDialog, ActionRow, AlertDialog, Application, ApplicationWindow, HeaderBar, StatusPage,
-    Toast, ToastOverlay,
+    AboutDialog, AlertDialog, Application, ApplicationWindow, HeaderBar, StatusPage, Toast,
+    ToastOverlay, WindowTitle,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -45,9 +45,18 @@ struct ControllerState {
 
 pub struct MainWindow {
     pub window: ApplicationWindow,
+    prompt_open_fn: Rc<dyn Fn(PathBuf)>,
+    prompt_import_fn: Rc<dyn Fn(PathBuf)>,
 }
 
 impl MainWindow {
+    pub fn prompt_open_file(&self, path: PathBuf) {
+        (self.prompt_open_fn)(path);
+    }
+
+    pub fn prompt_import_file(&self, path: PathBuf) {
+        (self.prompt_import_fn)(path);
+    }
     pub fn new(
         app: &Application,
         paths: AppPaths,
@@ -82,7 +91,6 @@ impl MainWindow {
             row_widgets: HashMap::new(),
         }));
 
-
         // Prevents signal handler loops when programmatically updating widgets
         let is_updating = Rc::new(Cell::new(false));
 
@@ -93,18 +101,20 @@ impl MainWindow {
 
         // HeaderBar
         let header_bar = HeaderBar::builder().build();
+        let title_widget = WindowTitle::new("AppNest", "No Applications");
+        header_bar.set_title_widget(Some(&title_widget));
 
         // Add button
         let add_btn = Button::builder()
             .icon_name("list-add-symbolic")
-            .tooltip_text("Add or Import AppImage")
+            .tooltip_text("Add AppImage (Ctrl+O)")
             .build();
         header_bar.pack_start(&add_btn);
 
         // Refresh button
         let refresh_btn = Button::builder()
             .icon_name("view-refresh-symbolic")
-            .tooltip_text("Refresh Application List")
+            .tooltip_text("Refresh Application List (Ctrl+R)")
             .build();
         header_bar.pack_start(&refresh_btn);
 
@@ -127,14 +137,17 @@ impl MainWindow {
         let paned = Paned::builder()
             .orientation(Orientation::Horizontal)
             .wide_handle(true)
+            .resize_start_child(false)
+            .resize_end_child(true)
             .shrink_start_child(false)
-            .shrink_end_child(false)
+            .shrink_end_child(true)
             .hexpand(true)
             .vexpand(true)
             .build();
-        paned.set_position(340);
+        paned.set_position(300);
 
         let app_list_widget = Rc::new(RefCell::new(AppListWidget::new()));
+        app_list_widget.borrow().container.set_size_request(280, -1);
         paned.set_start_child(Some(&app_list_widget.borrow().container));
 
         // Right side: Stack with placeholder or details
@@ -163,6 +176,7 @@ impl MainWindow {
             .default_height(640)
             .content(&toast_overlay)
             .build();
+        window.set_size_request(760, 480);
 
         // Register window actions for menu
         let paths_clone_for_action = paths.clone();
@@ -196,7 +210,7 @@ impl MainWindow {
                 let about = AboutDialog::builder()
                     .application_name("AppNest")
                     .application_icon("io.github._1kailas.AppNest")
-                    .version("0.1.0")
+                    .version(env!("CARGO_PKG_VERSION"))
                     .developer_name("1kailas")
                     .comments("A modern, high-performance AppImage manager built with Rust, GTK4, and Libadwaita.")
                     .website("https://github.com/1kailas/appnest")
@@ -220,15 +234,15 @@ impl MainWindow {
             let toast_overlay = toast_overlay.clone();
             let launch_cmd = Arc::clone(&launch_cmd);
             let close_cmd = Arc::clone(&close_cmd);
-            let import_cmd = Arc::clone(&import_cmd);
             let is_updating = Rc::clone(&is_updating);
             let paths_for_refresh = paths.clone();
             let repo_for_refresh = Arc::clone(&repo);
+            let title_widget_clone = title_widget.clone();
 
             Rc::new(move || {
                 let settings = config_store.load();
                 let scan_dirs = if settings.scan_directories.is_empty() {
-                    config_store.load().scan_directories
+                    paths_for_refresh.default_scan_directories()
                 } else {
                     settings.scan_directories.clone()
                 };
@@ -307,31 +321,28 @@ impl MainWindow {
                     let state_clone = Rc::clone(&state);
                     let app_id_c = app_id.clone();
                     let app_name_c = app_name.clone();
+                    let listbox_weak = listbox.downgrade();
+                    let row_weak = row_widget.row.downgrade();
 
                     row_widget.launch_button.connect_clicked(move |_| {
-                        let is_running = close_cmd_clone.is_running(&app_id_c);
-                        if is_running {
+                        if let (Some(lb), Some(rw)) = (listbox_weak.upgrade(), row_weak.upgrade()) {
+                            lb.select_row(Some(&rw));
+                        }
+                        let is_closing = row_widget_clone.is_running.get();
+                        if is_closing {
                             match close_cmd_clone.execute(&app_id_c) {
                                 Ok(_) => {
-                                    toast_overlay_clone.add_toast(Toast::new(&format!(
-                                        "Closed {}",
-                                        app_name_c
-                                    )));
-                                    row_widget_clone.set_running_state(false);
-                                    if state_clone.borrow().selected_id.as_deref()
-                                        == Some(&app_id_c)
-                                    {
-                                        app_details_widget_clone
-                                            .borrow()
-                                            .set_running_state(false);
-                                    }
+                                    toast_overlay_clone
+                                        .add_toast(Toast::new(&format!("Closed {}", app_name_c)));
                                 }
-                                Err(e) => {
-                                    toast_overlay_clone.add_toast(Toast::new(&format!(
-                                        "Failed to close {}: {}",
-                                        app_name_c, e
-                                    )));
+                                Err(_) => {
+                                    toast_overlay_clone
+                                        .add_toast(Toast::new(&format!("Closed {}", app_name_c)));
                                 }
+                            }
+                            row_widget_clone.set_running_state(false);
+                            if state_clone.borrow().selected_id.as_deref() == Some(&app_id_c) {
+                                app_details_widget_clone.borrow().set_running_state(false);
                             }
                         } else {
                             match launch_cmd_clone.execute(&app_id_c, &[]) {
@@ -344,9 +355,7 @@ impl MainWindow {
                                     if state_clone.borrow().selected_id.as_deref()
                                         == Some(&app_id_c)
                                     {
-                                        app_details_widget_clone
-                                            .borrow()
-                                            .set_running_state(true);
+                                        app_details_widget_clone.borrow().set_running_state(true);
                                     }
                                 }
                                 Err(e) => {
@@ -365,90 +374,37 @@ impl MainWindow {
 
                 state.borrow_mut().row_widgets = row_map;
 
-
-                // Populate discovered unmanaged list safely
-                let discovered_list = &app_list_widget.borrow().discovered_list;
-                while let Some(row) = discovered_list.row_at_index(0) {
-                    discovered_list.remove(&row);
-                }
-
-                let unmanaged = &listing.unmanaged_discovered;
-                if unmanaged.is_empty() {
-                    app_list_widget.borrow().discovered_box.set_visible(false);
-                } else {
-                    app_list_widget.borrow().discovered_box.set_visible(true);
-                    for path in unmanaged {
-                        let row = ActionRow::builder()
-                            .title(&*path.file_name().unwrap_or_default().to_string_lossy())
-                            .subtitle(&*path.to_string_lossy())
-                            .build();
-
-                        let import_btn = Button::builder()
-                            .label("Import")
-                            .valign(Align::Center)
-                            .build();
-                        import_btn.add_css_class("suggested-action");
-                        import_btn.add_css_class("pill");
-
-                        let import_cmd_c = Arc::clone(&import_cmd);
-                        let config_store_c = Arc::clone(&config_store);
-                        let toast_c = toast_overlay.clone();
-                        let p_clone = path.clone();
-                        let state_c = Rc::clone(&state);
-
-                        import_btn.connect_clicked(move |btn| {
-                            btn.set_sensitive(false);
-                            btn.set_label("Importing...");
-                            let p_inner = p_clone.clone();
-                            let import_cmd_inner = Arc::clone(&import_cmd_c);
-                            let config_store_inner = Arc::clone(&config_store_c);
-                            let toast_inner = toast_c.clone();
-                            let btn_inner = btn.clone();
-                            let state_inner = Rc::clone(&state_c);
-
-                            let (tx, rx) = async_channel::bounded(1);
-                            std::thread::spawn(move || {
-                                let s = config_store_inner.load();
-                                let res = import_cmd_inner.execute(&p_inner, &s);
-                                let _ = tx.send_blocking(res);
-                            });
-
-                            glib::spawn_future_local(async move {
-                                if let Ok(res) = rx.recv().await {
-                                    btn_inner.set_sensitive(true);
-                                    btn_inner.set_label("Import");
-                                    match res {
-                                        Ok(imported) => {
-                                            toast_inner.add_toast(Toast::new(&format!(
-                                                "Imported {}",
-                                                imported.name
-                                            )));
-                                            state_inner.borrow_mut().selected_id =
-                                                Some(imported.id);
-                                        }
-                                        Err(e) => {
-                                            toast_inner.add_toast(Toast::new(&format!(
-                                                "Import error: {}",
-                                                e
-                                            )));
-                                        }
-                                    }
-                                }
-                            });
-                        });
-
-                        row.add_suffix(&import_btn);
-                        discovered_list.append(&row);
-                    }
-                }
-
                 // Update empty state
                 let has_apps = !filtered_apps.is_empty();
                 let is_searching = !query.is_empty();
-                let has_discovered = !unmanaged.is_empty();
                 app_list_widget
                     .borrow()
-                    .set_empty_state(has_apps, is_searching, has_discovered);
+                    .set_empty_state(has_apps, is_searching);
+
+                // Update HeaderBar WindowTitle subtitle
+                let total_apps = filtered_apps.len();
+                let running_count = filtered_apps
+                    .iter()
+                    .filter(|a| close_cmd.is_running(&a.id))
+                    .count();
+
+                let subtitle = if total_apps == 0 {
+                    "No Applications".to_string()
+                } else if running_count > 0 {
+                    format!(
+                        "{} Application{} • {} Running",
+                        total_apps,
+                        if total_apps == 1 { "" } else { "s" },
+                        running_count
+                    )
+                } else {
+                    format!(
+                        "{} Application{}",
+                        total_apps,
+                        if total_apps == 1 { "" } else { "s" }
+                    )
+                };
+                title_widget_clone.set_subtitle(&subtitle);
 
                 // If currently selected app is still present, re-select
                 let found_app = {
@@ -466,7 +422,6 @@ impl MainWindow {
                         .set_running_state(close_cmd.is_running(&found.id));
                     is_updating.set(false);
                     right_stack.set_visible_child_name("details");
-
 
                     // Visually highlight row in listbox
                     if let Some(pos) = filtered_apps.iter().position(|a| a.id == found.id) {
@@ -554,62 +509,57 @@ impl MainWindow {
             let launch_btn = app_details_widget.borrow().launch_btn.clone();
 
             launch_btn.connect_clicked(move |_| {
+                let selected = {
+                    let st = state.borrow();
+                    st.selected_id.as_ref().and_then(|id| {
+                        st.apps
+                            .iter()
+                            .find(|a| &a.id == id)
+                            .map(|a| (id.clone(), a.name.clone()))
+                    })
+                };
 
-                    let selected = {
+                if let Some((app_id, app_name)) = selected {
+                    let is_closing = app_details_widget.borrow().is_running.get();
+                    if is_closing {
+                        match close_cmd.execute(&app_id) {
+                            Ok(_) => {
+                                toast_overlay
+                                    .add_toast(Toast::new(&format!("Closed {}", app_name)));
+                            }
+                            Err(_) => {
+                                toast_overlay
+                                    .add_toast(Toast::new(&format!("Closed {}", app_name)));
+                            }
+                        }
+                        app_details_widget.borrow().set_running_state(false);
                         let st = state.borrow();
-                        st.selected_id.as_ref().and_then(|id| {
-                            st.apps
-                                .iter()
-                                .find(|a| &a.id == id)
-                                .map(|a| (id.clone(), a.name.clone()))
-                        })
-                    };
-
-                    if let Some((app_id, app_name)) = selected {
-                        let is_running = close_cmd.is_running(&app_id);
-                        if is_running {
-                            match close_cmd.execute(&app_id) {
-                                Ok(_) => {
-                                    toast_overlay.add_toast(Toast::new(&format!(
-                                        "Closed {}",
-                                        app_name
-                                    )));
-                                    app_details_widget.borrow().set_running_state(false);
-                                    let st = state.borrow();
-                                    if let Some(row_widget) = st.row_widgets.get(&app_id) {
-                                        row_widget.set_running_state(false);
-                                    }
-                                }
-                                Err(e) => {
-                                    toast_overlay.add_toast(Toast::new(&format!(
-                                        "Failed to close {}: {}",
-                                        app_name, e
-                                    )));
+                        if let Some(row_widget) = st.row_widgets.get(&app_id) {
+                            row_widget.set_running_state(false);
+                        }
+                    } else {
+                        match launch_cmd.execute(&app_id, &[]) {
+                            Ok(pid) => {
+                                toast_overlay.add_toast(Toast::new(&format!(
+                                    "Launched {} (PID: {})",
+                                    app_name, pid
+                                )));
+                                app_details_widget.borrow().set_running_state(true);
+                                let st = state.borrow();
+                                if let Some(row_widget) = st.row_widgets.get(&app_id) {
+                                    row_widget.set_running_state(true);
                                 }
                             }
-                        } else {
-                            match launch_cmd.execute(&app_id, &[]) {
-                                Ok(pid) => {
-                                    toast_overlay.add_toast(Toast::new(&format!(
-                                        "Launched {} (PID: {})",
-                                        app_name, pid
-                                    )));
-                                    app_details_widget.borrow().set_running_state(true);
-                                    let st = state.borrow();
-                                    if let Some(row_widget) = st.row_widgets.get(&app_id) {
-                                        row_widget.set_running_state(true);
-                                    }
-                                }
-                                Err(e) => {
-                                    toast_overlay.add_toast(Toast::new(&format!(
-                                        "Launch error for {}: {}",
-                                        app_name, e
-                                    )));
-                                }
+                            Err(e) => {
+                                toast_overlay.add_toast(Toast::new(&format!(
+                                    "Launch error for {}: {}",
+                                    app_name, e
+                                )));
                             }
                         }
                     }
-                });
+                }
+            });
         }
 
         // Periodic running status watcher (syncs button states every second)
@@ -617,27 +567,52 @@ impl MainWindow {
             let state = Rc::clone(&state);
             let close_cmd = Arc::clone(&close_cmd);
             let app_details_widget = Rc::clone(&app_details_widget);
+            let title_widget_watcher = title_widget.clone();
 
-            glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
+            glib::timeout_add_local(std::time::Duration::from_millis(2000), move || {
                 let (selected_id, row_widgets) = {
                     let st = state.borrow();
                     (st.selected_id.clone(), st.row_widgets.clone())
                 };
 
-                if let Some(ref id) = selected_id {
+                let mut checked_status: HashMap<String, bool> = HashMap::new();
+
+                for (id, row_widget) in &row_widgets {
                     let running = close_cmd.is_running(id);
+                    checked_status.insert(id.clone(), running);
+                    row_widget.set_running_state(running);
+                }
+
+                if let Some(ref id) = selected_id {
+                    let running = checked_status
+                        .get(id)
+                        .copied()
+                        .unwrap_or_else(|| close_cmd.is_running(id));
                     app_details_widget.borrow().set_running_state(running);
                 }
 
-                for (id, row_widget) in row_widgets {
-                    let running = close_cmd.is_running(&id);
-                    row_widget.set_running_state(running);
-                }
+                let running_count = row_widgets
+                    .keys()
+                    .filter(|id| checked_status.get(*id).copied().unwrap_or(false))
+                    .count();
+                let total = row_widgets.len();
+                let subtitle = if total == 0 {
+                    "No Applications".to_string()
+                } else if running_count > 0 {
+                    format!(
+                        "{} Application{} • {} Running",
+                        total,
+                        if total == 1 { "" } else { "s" },
+                        running_count
+                    )
+                } else {
+                    format!("{} Application{}", total, if total == 1 { "" } else { "s" })
+                };
+                title_widget_watcher.set_subtitle(&subtitle);
 
                 glib::ControlFlow::Continue
             });
         }
-
 
         // Connect Details: Reveal File Button
         {
@@ -987,14 +962,538 @@ impl MainWindow {
             });
         }
 
-        // Shared Add AppImage logic (File picker with background import)
-        let handle_add = {
+        // Define integration prompt closures
+        let prompt_open_fn = {
             let window_clone = window.clone();
-            let import_cmd = Arc::clone(&import_cmd);
-            let config_store = Arc::clone(&config_store);
             let toast_overlay = toast_overlay.clone();
+            let import_cmd = Arc::clone(&import_cmd);
+            let launcher = Arc::clone(&launcher);
+            let config_store = Arc::clone(&config_store);
+            let repo = Arc::clone(&repo);
+            let paths = paths.clone();
             let r_fn = Rc::clone(&refresh_list_fn);
             let state = Rc::clone(&state);
+
+            Rc::new(move |path: PathBuf| {
+                if !path.is_file() {
+                    toast_overlay
+                        .add_toast(Toast::new(&format!("File not found: {}", path.display())));
+                    return;
+                }
+
+                let is_appimage_ext = path
+                    .extension()
+                    .map_or(false, |ext| ext.eq_ignore_ascii_case("appimage"));
+                if !is_appimage_ext && AppImageValidator::validate(&path).is_err() {
+                    toast_overlay.add_toast(Toast::new(&format!(
+                        "Invalid AppImage: {}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    )));
+                    return;
+                }
+
+                // Check if already in AppNest
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                let existing = match repo.list() {
+                    Ok(list) => list.into_iter().find(|a| {
+                        a.path == path
+                            || a.path.canonicalize().unwrap_or_else(|_| a.path.clone()) == canonical
+                    }),
+                    Err(_) => None,
+                };
+
+                // If already in AppNest, just select it and present the window — no dialog, no launch
+                if let Some(existing_app) = existing {
+                    let has_desktop_shortcut = paths.user_desktop_dir.as_ref().map_or(false, |d| {
+                        d.join(format!("{}.desktop", existing_app.name)).exists()
+                            || d.join(format!("{}.desktop", existing_app.id)).exists()
+                    });
+
+                    if !has_desktop_shortcut || !existing_app.desktop_integrated {
+                        // Missing desktop shortcut — offer to create one (but don't auto-launch)
+                        let win_dlg = window_clone.clone();
+                        let toast_dlg = toast_overlay.clone();
+                        let paths_dlg = paths.clone();
+                        let repo_dlg = Arc::clone(&repo);
+                        let r_fn_dlg = Rc::clone(&r_fn);
+                        let state_dlg = Rc::clone(&state);
+
+                        let dialog = AlertDialog::builder()
+                            .heading(&format!("Create Shortcut for {}?", existing_app.name))
+                            .body(&format!(
+                                "\"{}\" is already in AppNest but doesn't have a desktop shortcut.",
+                                existing_app.name
+                            ))
+                            .build();
+
+                        dialog.add_response("cancel", "No Thanks");
+                        dialog.add_response("shortcut", "Create Desktop Shortcut");
+                        dialog.set_response_appearance(
+                            "shortcut",
+                            libadwaita::ResponseAppearance::Suggested,
+                        );
+                        dialog.set_default_response(Some("shortcut"));
+                        dialog.set_close_response("cancel");
+
+                        let app_c = existing_app.clone();
+                        dialog.choose(Some(&win_dlg), None::<&gio::Cancellable>, move |resp| {
+                            if resp.as_str() == "shortcut" {
+                                let mut app = app_c.clone();
+                                if let Ok(entry_path) = DesktopEntryService::create_entry(
+                                    &app,
+                                    &paths_dlg.desktop_applications_dir,
+                                ) {
+                                    app.desktop_entry_path = Some(entry_path);
+                                    app.desktop_integrated = true;
+                                    let _ = repo_dlg.save(&app);
+                                }
+                                let _ = DesktopEntryService::create_user_desktop_shortcut(
+                                    &app,
+                                    paths_dlg.user_desktop_dir.as_deref(),
+                                );
+                                toast_dlg.add_toast(Toast::new(&format!(
+                                    "Created desktop shortcut for {}",
+                                    app.name
+                                )));
+                            }
+                            // Always select the app in AppNest regardless of choice
+                            state_dlg.borrow_mut().selected_id = Some(app_c.id.clone());
+                            r_fn_dlg();
+                        });
+                    } else {
+                        // Already fully integrated — just select and show, no dialog needed
+                        state.borrow_mut().selected_id = Some(existing_app.id.clone());
+                        r_fn();
+                        toast_overlay.add_toast(Toast::new(&format!(
+                            "{} is already in AppNest",
+                            existing_app.name
+                        )));
+                    }
+                    return;
+                }
+
+                // New AppImage — show dialog to add to AppNest
+                let app_name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "AppImage".to_string());
+
+                let dialog = AlertDialog::builder()
+                    .heading(&format!("Add {} to AppNest?", app_name))
+                    .body(&format!(
+                        "Would you like to add \"{}\" to AppNest and create a desktop shortcut?",
+                        app_name
+                    ))
+                    .build();
+
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("run_once", "Run Once");
+                dialog.add_response("add_only", "Add without Shortcut");
+                dialog.add_response("integrate", "Add & Create Shortcut");
+                dialog.set_response_appearance(
+                    "integrate",
+                    libadwaita::ResponseAppearance::Suggested,
+                );
+                dialog.set_default_response(Some("integrate"));
+                dialog.set_close_response("cancel");
+
+                let win_dlg = window_clone.clone();
+                let toast_dlg = toast_overlay.clone();
+                let import_cmd_dlg = Arc::clone(&import_cmd);
+                let launcher_dlg = Arc::clone(&launcher);
+                let config_store_dlg = Arc::clone(&config_store);
+                let repo_dlg = Arc::clone(&repo);
+                let paths_dlg = paths.clone();
+                let r_fn_dlg = Rc::clone(&r_fn);
+                let state_dlg = Rc::clone(&state);
+                let path_dlg = path.clone();
+                let app_name_dlg = app_name.clone();
+
+                dialog.choose(Some(&win_dlg), None::<&gio::Cancellable>, move |response| {
+                    match response.as_str() {
+                        "integrate" | "add_only" => {
+                            let create_shortcut = response.as_str() == "integrate";
+                            toast_dlg.add_toast(Toast::new(&format!(
+                                "Adding {} to AppNest...",
+                                app_name_dlg
+                            )));
+
+                            let (tx, rx) = async_channel::bounded(1);
+                            let p = path_dlg.clone();
+                            let import_cmd = Arc::clone(&import_cmd_dlg);
+                            let config_store = Arc::clone(&config_store_dlg);
+
+                            std::thread::spawn(move || {
+                                let mut settings = config_store.load();
+                                settings.auto_integrate_desktop = create_shortcut;
+                                let res = import_cmd.execute(&p, &settings);
+                                let _ = tx.send_blocking(res);
+                            });
+
+                            let toast_res = toast_dlg.clone();
+                            let r_fn_res = Rc::clone(&r_fn_dlg);
+                            let state_res = Rc::clone(&state_dlg);
+                            let repo_res = Arc::clone(&repo_dlg);
+                            let paths_res = paths_dlg.clone();
+                            let name_res = app_name_dlg.clone();
+
+                            glib::spawn_future_local(async move {
+                                if let Ok(res) = rx.recv().await {
+                                    match res {
+                                        Ok(mut app) => {
+                                            if create_shortcut {
+                                                if !app.desktop_integrated {
+                                                    if let Ok(entry_path) =
+                                                        DesktopEntryService::create_entry(
+                                                            &app,
+                                                            &paths_res.desktop_applications_dir,
+                                                        )
+                                                    {
+                                                        app.desktop_integrated = true;
+                                                        app.desktop_entry_path = Some(entry_path);
+                                                        let _ = repo_res.save(&app);
+                                                    }
+                                                }
+                                                let _ =
+                                                    DesktopEntryService::create_user_desktop_shortcut(
+                                                        &app,
+                                                        paths_res.user_desktop_dir.as_deref(),
+                                                    );
+                                            }
+
+                                            // Auto-select the newly added app (no auto-launch)
+                                            state_res.borrow_mut().selected_id =
+                                                Some(app.id.clone());
+                                            r_fn_res();
+
+                                            let msg = if create_shortcut {
+                                                format!(
+                                                    "Added {} to AppNest with desktop shortcut",
+                                                    app.name
+                                                )
+                                            } else {
+                                                format!("Added {} to AppNest", app.name)
+                                            };
+                                            toast_res.add_toast(Toast::new(&msg));
+                                        }
+                                        Err(e) => {
+                                            toast_res.add_toast(Toast::new(&format!(
+                                                "Failed to add {}: {}",
+                                                name_res, e
+                                            )));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        "run_once" => {
+                            let name = path_dlg
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "AppImage".to_string());
+                            let app_id = AppImage::sanitize_id(&name);
+                            let mut temp_app = AppImage::new(&app_id, &name, path_dlg);
+                            match launcher_dlg.launch(&mut temp_app, &[]) {
+                                Ok(pid) => {
+                                    toast_dlg.add_toast(Toast::new(&format!(
+                                        "Running {} once (PID: {})",
+                                        name, pid
+                                    )));
+                                }
+                                Err(e) => {
+                                    toast_dlg.add_toast(Toast::new(&format!(
+                                        "Failed to run {}: {}",
+                                        name, e
+                                    )));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            })
+        };
+
+        let prompt_import_fn = {
+            let window_clone = window.clone();
+            let toast_overlay = toast_overlay.clone();
+            let import_cmd = Arc::clone(&import_cmd);
+            let config_store = Arc::clone(&config_store);
+            let repo = Arc::clone(&repo);
+            let paths = paths.clone();
+            let r_fn = Rc::clone(&refresh_list_fn);
+            let state = Rc::clone(&state);
+
+            Rc::new(move |path: PathBuf| {
+                if !path.is_file() {
+                    toast_overlay
+                        .add_toast(Toast::new(&format!("File not found: {}", path.display())));
+                    return;
+                }
+
+                let is_appimage_ext = path
+                    .extension()
+                    .map_or(false, |ext| ext.eq_ignore_ascii_case("appimage"));
+                if !is_appimage_ext && AppImageValidator::validate(&path).is_err() {
+                    toast_overlay.add_toast(Toast::new(&format!(
+                        "Invalid AppImage: {}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    )));
+                    return;
+                }
+
+                // Check if already in AppNest
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                let existing = match repo.list() {
+                    Ok(list) => list.into_iter().find(|a| {
+                        a.path == path
+                            || a.path.canonicalize().unwrap_or_else(|_| a.path.clone()) == canonical
+                    }),
+                    Err(_) => None,
+                };
+
+                if let Some(existing_app) = existing {
+                    state.borrow_mut().selected_id = Some(existing_app.id);
+                    r_fn();
+                    toast_overlay.add_toast(Toast::new("Application is already in AppNest"));
+                    return;
+                }
+
+                let app_name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "AppImage".to_string());
+
+                let dialog = AlertDialog::builder()
+                    .heading(&format!("Add {} to AppNest?", app_name))
+                    .body(&format!(
+                        "Would you like to add \"{}\" to AppNest and create a desktop shortcut?",
+                        app_name
+                    ))
+                    .build();
+
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("add_only", "Add without Shortcut");
+                dialog.add_response("integrate", "Add & Create Shortcut");
+                dialog.set_response_appearance(
+                    "integrate",
+                    libadwaita::ResponseAppearance::Suggested,
+                );
+                dialog.set_default_response(Some("integrate"));
+                dialog.set_close_response("cancel");
+
+                let win_dlg = window_clone.clone();
+                let toast_dlg = toast_overlay.clone();
+                let import_cmd_dlg = Arc::clone(&import_cmd);
+                let config_store_dlg = Arc::clone(&config_store);
+                let repo_dlg = Arc::clone(&repo);
+                let paths_dlg = paths.clone();
+                let r_fn_dlg = Rc::clone(&r_fn);
+                let state_dlg = Rc::clone(&state);
+                let path_dlg = path.clone();
+                let app_name_dlg = app_name.clone();
+
+                dialog.choose(Some(&win_dlg), None::<&gio::Cancellable>, move |response| {
+                    match response.as_str() {
+                        "integrate" | "add_only" => {
+                            let create_shortcut = response.as_str() == "integrate";
+                            toast_dlg.add_toast(Toast::new(&format!(
+                                "Adding {} to AppNest...",
+                                app_name_dlg
+                            )));
+
+                            let (tx, rx) = async_channel::bounded(1);
+                            let p = path_dlg.clone();
+                            let import_cmd = Arc::clone(&import_cmd_dlg);
+                            let config_store = Arc::clone(&config_store_dlg);
+
+                            std::thread::spawn(move || {
+                                let mut settings = config_store.load();
+                                settings.auto_integrate_desktop = create_shortcut;
+                                let res = import_cmd.execute(&p, &settings);
+                                let _ = tx.send_blocking(res);
+                            });
+
+                            let toast_res = toast_dlg.clone();
+                            let r_fn_res = Rc::clone(&r_fn_dlg);
+                            let state_res = Rc::clone(&state_dlg);
+                            let repo_res = Arc::clone(&repo_dlg);
+                            let paths_res = paths_dlg.clone();
+                            let name_res = app_name_dlg.clone();
+
+                            glib::spawn_future_local(async move {
+                                if let Ok(res) = rx.recv().await {
+                                    match res {
+                                        Ok(mut app) => {
+                                            if create_shortcut {
+                                                if !app.desktop_integrated {
+                                                    if let Ok(entry_path) =
+                                                        DesktopEntryService::create_entry(
+                                                            &app,
+                                                            &paths_res.desktop_applications_dir,
+                                                        )
+                                                    {
+                                                        app.desktop_integrated = true;
+                                                        app.desktop_entry_path = Some(entry_path);
+                                                        let _ = repo_res.save(&app);
+                                                    }
+                                                }
+                                                let _ = DesktopEntryService::create_user_desktop_shortcut(
+                                                    &app,
+                                                    paths_res.user_desktop_dir.as_deref(),
+                                                );
+                                            }
+
+                                            state_res.borrow_mut().selected_id =
+                                                Some(app.id.clone());
+                                            r_fn_res();
+
+                                            let msg = if create_shortcut {
+                                                format!("Added {} to AppNest and desktop", app.name)
+                                            } else {
+                                                format!("Added {} to AppNest", app.name)
+                                            };
+                                            toast_res.add_toast(Toast::new(&msg));
+                                        }
+                                        Err(e) => {
+                                            toast_res.add_toast(Toast::new(&format!(
+                                                "Failed to add {}: {}",
+                                                name_res, e
+                                            )));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        _ => {}
+                    }
+                });
+            })
+        };
+
+        let prompt_import_multiple_fn = {
+            let window_clone = window.clone();
+            let toast_overlay = toast_overlay.clone();
+            let import_cmd = Arc::clone(&import_cmd);
+            let config_store = Arc::clone(&config_store);
+            let repo = Arc::clone(&repo);
+            let paths = paths.clone();
+            let r_fn = Rc::clone(&refresh_list_fn);
+            let state = Rc::clone(&state);
+
+            Rc::new(move |paths_to_add: Vec<PathBuf>| {
+                let count = paths_to_add.len();
+                let dialog = AlertDialog::builder()
+                    .heading(&format!("Add {} Applications to AppNest?", count))
+                    .body("Would you like to add these applications to AppNest and create desktop shortcuts?")
+                    .build();
+
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("add_only", "Add without Shortcuts");
+                dialog.add_response("integrate", "Add & Create Shortcuts");
+                dialog.set_response_appearance(
+                    "integrate",
+                    libadwaita::ResponseAppearance::Suggested,
+                );
+                dialog.set_default_response(Some("integrate"));
+                dialog.set_close_response("cancel");
+
+                let win_dlg = window_clone.clone();
+                let toast_dlg = toast_overlay.clone();
+                let import_cmd_dlg = Arc::clone(&import_cmd);
+                let config_store_dlg = Arc::clone(&config_store);
+                let repo_dlg = Arc::clone(&repo);
+                let paths_dlg = paths.clone();
+                let r_fn_dlg = Rc::clone(&r_fn);
+                let state_dlg = Rc::clone(&state);
+
+                dialog.choose(
+                    Some(&win_dlg),
+                    None::<&gio::Cancellable>,
+                    move |response| match response.as_str() {
+                        "integrate" | "add_only" => {
+                            let create_shortcuts = response.as_str() == "integrate";
+                            toast_dlg.add_toast(Toast::new("Adding applications to AppNest..."));
+
+                            let (tx, rx) = async_channel::bounded(1);
+                            let import_cmd = Arc::clone(&import_cmd_dlg);
+                            let config_store = Arc::clone(&config_store_dlg);
+                            let paths_batch = paths_to_add.clone();
+
+                            std::thread::spawn(move || {
+                                let mut settings = config_store.load();
+                                settings.auto_integrate_desktop = create_shortcuts;
+                                let mut imported = Vec::new();
+                                let mut errors = Vec::new();
+
+                                for p in paths_batch {
+                                    match import_cmd.execute(&p, &settings) {
+                                        Ok(app) => imported.push(app),
+                                        Err(e) => errors.push(format!(
+                                            "{}: {}",
+                                            p.file_name().unwrap_or_default().to_string_lossy(),
+                                            e
+                                        )),
+                                    }
+                                }
+                                let _ = tx.send_blocking((imported, errors));
+                            });
+
+                            let toast_res = toast_dlg.clone();
+                            let r_fn_res = Rc::clone(&r_fn_dlg);
+                            let state_res = Rc::clone(&state_dlg);
+                            let repo_res = Arc::clone(&repo_dlg);
+                            let paths_res = paths_dlg.clone();
+
+                            glib::spawn_future_local(async move {
+                                if let Ok((mut imported, errors)) = rx.recv().await {
+                                    if !imported.is_empty() {
+                                        if create_shortcuts {
+                                            for app in &mut imported {
+                                                if !app.desktop_integrated {
+                                                    if let Ok(entry_path) = DesktopEntryService::create_entry(
+                                                        app,
+                                                        &paths_res.desktop_applications_dir,
+                                                    ) {
+                                                        app.desktop_integrated = true;
+                                                        app.desktop_entry_path = Some(entry_path);
+                                                        let _ = repo_res.save(app);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if let Some(last) = imported.last() {
+                                            state_res.borrow_mut().selected_id = Some(last.id.clone());
+                                        }
+                                        r_fn_res();
+
+                                        let msg = if create_shortcuts {
+                                            format!("Added {} applications to AppNest with desktop shortcuts", imported.len())
+                                        } else {
+                                            format!("Added {} applications to AppNest", imported.len())
+                                        };
+                                        toast_res.add_toast(Toast::new(&msg));
+                                    }
+                                    if !errors.is_empty() {
+                                        toast_res.add_toast(Toast::new(&format!(
+                                            "Some applications failed to add: {}",
+                                            errors.join("; ")
+                                        )));
+                                    }
+                                }
+                            });
+                        }
+                        _ => {}
+                    },
+                );
+            })
+        };
+
+        // Shared Add AppImage logic (File picker leading to integration prompt)
+        let handle_add = {
+            let window_clone = window.clone();
+            let prompt_import = Rc::clone(&prompt_import_fn);
 
             Rc::new(move || {
                 let chooser = FileChooserNative::builder()
@@ -1009,52 +1508,13 @@ impl MainWindow {
                 filter.add_pattern("*.appimage");
                 chooser.add_filter(&filter);
 
-                let import_cmd_c = Arc::clone(&import_cmd);
-                let config_store_c = Arc::clone(&config_store);
-                let toast_c = toast_overlay.clone();
-                let r_fn_c = Rc::clone(&r_fn);
-                let state_c = Rc::clone(&state);
+                let prompt_import_c = Rc::clone(&prompt_import);
 
                 chooser.connect_response(move |dialog, response| {
                     if response == ResponseType::Accept {
                         if let Some(file) = dialog.file() {
                             if let Some(path) = file.path() {
-                                toast_c
-                                    .add_toast(Toast::new("Importing AppImage in background..."));
-
-                                let import_cmd_inner = Arc::clone(&import_cmd_c);
-                                let config_store_inner = Arc::clone(&config_store_c);
-                                let toast_inner = toast_c.clone();
-                                let r_fn_inner = Rc::clone(&r_fn_c);
-                                let state_inner = Rc::clone(&state_c);
-
-                                let (tx, rx) = async_channel::bounded(1);
-                                std::thread::spawn(move || {
-                                    let settings = config_store_inner.load();
-                                    let res = import_cmd_inner.execute(&path, &settings);
-                                    let _ = tx.send_blocking(res);
-                                });
-
-                                glib::spawn_future_local(async move {
-                                    if let Ok(res) = rx.recv().await {
-                                        match res {
-                                            Ok(app) => {
-                                                toast_inner.add_toast(Toast::new(&format!(
-                                                    "Successfully imported {}",
-                                                    app.name
-                                                )));
-                                                state_inner.borrow_mut().selected_id = Some(app.id);
-                                                r_fn_inner();
-                                            }
-                                            Err(e) => {
-                                                toast_inner.add_toast(Toast::new(&format!(
-                                                    "Import error: {}",
-                                                    e
-                                                )));
-                                            }
-                                        }
-                                    }
-                                });
+                                prompt_import_c(path);
                             }
                         }
                     }
@@ -1116,11 +1576,8 @@ impl MainWindow {
 
         // Drag and Drop support
         {
-            let import_cmd = Arc::clone(&import_cmd);
-            let config_store = Arc::clone(&config_store);
-            let toast_overlay = toast_overlay.clone();
-            let r_fn = Rc::clone(&refresh_list_fn);
-            let state = Rc::clone(&state);
+            let prompt_import_drop = Rc::clone(&prompt_import_fn);
+            let prompt_import_mult_drop = Rc::clone(&prompt_import_multiple_fn);
 
             let drop_target = DropTarget::new(glib::types::Type::INVALID, gdk::DragAction::COPY);
             drop_target.set_types(&[gdk::FileList::static_type(), gio::File::static_type()]);
@@ -1151,67 +1608,11 @@ impl MainWindow {
                     return false;
                 }
 
-                let import_cmd_c = Arc::clone(&import_cmd);
-                let config_store_c = Arc::clone(&config_store);
-                let toast_c = toast_overlay.clone();
-                let r_fn_c = Rc::clone(&r_fn);
-                let state_c = Rc::clone(&state);
-
-                toast_c.add_toast(Toast::new("Importing dropped AppImage(s)..."));
-
-                let (tx, rx) = async_channel::bounded(1);
-                std::thread::spawn(move || {
-                    let settings = config_store_c.load();
-                    let mut imported_names = Vec::new();
-                    let mut errors = Vec::new();
-                    let mut last_id = None;
-
-                    for p in paths {
-                        match import_cmd_c.execute(&p, &settings) {
-                            Ok(app) => {
-                                last_id = Some(app.id.clone());
-                                imported_names.push(app.name);
-                            }
-                            Err(e) => {
-                                errors.push(format!(
-                                    "{}: {}",
-                                    p.file_name().unwrap_or_default().to_string_lossy(),
-                                    e
-                                ));
-                            }
-                        }
-                    }
-
-                    let _ = tx.send_blocking((imported_names, errors, last_id));
-                });
-
-                glib::spawn_future_local(async move {
-                    if let Ok((imported_names, errors, last_id)) = rx.recv().await {
-                        if !imported_names.is_empty() {
-                            if imported_names.len() == 1 {
-                                toast_c.add_toast(Toast::new(&format!(
-                                    "Imported {}",
-                                    imported_names[0]
-                                )));
-                            } else {
-                                toast_c.add_toast(Toast::new(&format!(
-                                    "Imported {} applications",
-                                    imported_names.len()
-                                )));
-                            }
-                            if let Some(id) = last_id {
-                                state_c.borrow_mut().selected_id = Some(id);
-                            }
-                            r_fn_c();
-                        }
-                        if !errors.is_empty() {
-                            toast_c.add_toast(Toast::new(&format!(
-                                "Import failed: {}",
-                                errors.join("; ")
-                            )));
-                        }
-                    }
-                });
+                if paths.len() == 1 {
+                    prompt_import_drop(paths.remove(0));
+                } else {
+                    prompt_import_mult_drop(paths);
+                }
 
                 true
             });
@@ -1222,6 +1623,10 @@ impl MainWindow {
         // Initial populate
         refresh_list_fn();
 
-        Self { window }
+        Self {
+            window,
+            prompt_open_fn,
+            prompt_import_fn,
+        }
     }
 }

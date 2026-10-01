@@ -43,7 +43,9 @@ impl AppImageImporter {
             }
             dest
         } else {
-            FileSystem::make_executable(source_path)?;
+            // Don't add +x here — the launcher handles it before spawning.
+            // Keeping -x on the source file ensures file managers open with
+            // AppNest (MIME handler) rather than executing the AppImage directly.
             source_path.to_path_buf()
         };
 
@@ -103,6 +105,10 @@ impl AppImageImporter {
             {
                 app.desktop_entry_path = Some(desktop_path);
                 app.desktop_integrated = true;
+                let _ = DesktopEntryService::create_user_desktop_shortcut(
+                    &app,
+                    self.paths.user_desktop_dir.as_deref(),
+                );
             }
         }
 

@@ -24,11 +24,11 @@ impl AppImageScanner {
     }
 
     pub fn scan_multiple(directories: &[PathBuf]) -> Vec<PathBuf> {
+        let mut seen = std::collections::HashSet::new();
         let mut results = Vec::new();
         for dir in directories {
-            let found = Self::scan_directory(dir, 2);
-            for p in found {
-                if !results.contains(&p) {
+            for p in Self::scan_directory(dir, 2) {
+                if seen.insert(p.clone()) {
                     results.push(p);
                 }
             }

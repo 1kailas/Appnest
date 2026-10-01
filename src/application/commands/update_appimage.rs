@@ -58,10 +58,18 @@ impl UpdateAppImageCommand {
         if enable {
             let desktop_path =
                 DesktopEntryService::create_entry(&app, &self.paths.desktop_applications_dir)?;
+            let _ = DesktopEntryService::create_user_desktop_shortcut(
+                &app,
+                self.paths.user_desktop_dir.as_deref(),
+            );
             app.desktop_entry_path = Some(desktop_path);
             app.desktop_integrated = true;
         } else {
             DesktopEntryService::remove_entry(&app, &self.paths.desktop_applications_dir)?;
+            DesktopEntryService::remove_user_desktop_shortcut(
+                &app,
+                self.paths.user_desktop_dir.as_deref(),
+            );
             app.desktop_entry_path = None;
             app.desktop_integrated = false;
         }

@@ -10,6 +10,7 @@ use std::sync::Mutex;
 pub struct AppImageLauncher {
     paths: AppPaths,
     running_apps: Mutex<HashMap<String, Vec<u32>>>,
+    system_scan_cache: Mutex<HashMap<String, (std::time::Instant, Vec<u32>)>>,
 }
 
 impl AppImageLauncher {
@@ -17,6 +18,7 @@ impl AppImageLauncher {
         Self {
             paths,
             running_apps: Mutex::new(HashMap::new()),
+            system_scan_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -50,34 +52,64 @@ impl AppImageLauncher {
             running.entry(app.id.clone()).or_default().push(pid);
         }
 
+        if let Ok(mut cache) = self.system_scan_cache.lock() {
+            cache.insert(app.id.clone(), (std::time::Instant::now(), vec![pid]));
+        }
+
         Ok(pid)
     }
 
     pub fn is_running(&self, app: &AppImage) -> bool {
-        // 1. Check tracked PIDs
+        // 1. Check tracked PIDs (fast in-memory check, 0 disk I/O)
         if let Ok(mut running) = self.running_apps.lock() {
             if let Some(pids) = running.get_mut(&app.id) {
                 pids.retain(|&pid| ProcessLauncher::is_pid_alive(pid));
                 if !pids.is_empty() {
                     return true;
+                } else {
+                    running.remove(&app.id);
                 }
             }
         }
 
-        // 2. Discover running instances on the system
-        let system_pids =
-            ProcessLauncher::find_pids_for_appimage(&app.path, app.apprun_path().as_deref());
-        if !system_pids.is_empty() {
-            if let Ok(mut running) = self.running_apps.lock() {
-                running.insert(app.id.clone(), system_pids);
+        // 2. Discover running instances on the system (throttled to avoid heavy CPU/proc scans)
+        if !app.path.exists() {
+            return false;
+        }
+
+        let now = std::time::Instant::now();
+        if let Ok(mut cache) = self.system_scan_cache.lock() {
+            if let Some((last_checked, ref pids)) = cache.get(&app.id) {
+                if now.duration_since(*last_checked) < std::time::Duration::from_millis(2500) {
+                    return !pids.is_empty();
+                }
             }
-            return true;
+
+            let system_pids =
+                ProcessLauncher::find_pids_for_appimage(&app.path, app.apprun_path().as_deref());
+            let is_alive = !system_pids.is_empty();
+            if is_alive {
+                if let Ok(mut running) = self.running_apps.lock() {
+                    running.insert(app.id.clone(), system_pids.clone());
+                }
+            } else {
+                if let Ok(mut running) = self.running_apps.lock() {
+                    running.remove(&app.id);
+                }
+            }
+            cache.insert(app.id.clone(), (now, system_pids));
+            return is_alive;
         }
 
         false
     }
 
     pub fn terminate(&self, app: &AppImage) -> Result<(), AppImageError> {
+        // Clear caches immediately so UI reflects "not running" right away
+        if let Ok(mut cache) = self.system_scan_cache.lock() {
+            cache.remove(&app.id);
+        }
+
         let mut pids_to_kill = Vec::new();
 
         if let Ok(mut running) = self.running_apps.lock() {
@@ -103,10 +135,29 @@ impl AppImageLauncher {
         }
 
         let mut errors = Vec::new();
-        for pid in pids_to_kill {
-            if let Err(e) = ProcessLauncher::terminate_pid(pid) {
+        for pid in &pids_to_kill {
+            if let Err(e) = ProcessLauncher::terminate_pid(*pid) {
                 errors.push(format!("PID {}: {}", pid, e));
             }
+        }
+
+        // Wait briefly for processes to actually exit (up to 500ms)
+        for _ in 0..5 {
+            let still_alive = pids_to_kill
+                .iter()
+                .any(|pid| ProcessLauncher::is_pid_alive(*pid));
+            if !still_alive {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Force-clear caches again after termination to ensure clean state
+        if let Ok(mut cache) = self.system_scan_cache.lock() {
+            cache.insert(app.id.clone(), (std::time::Instant::now(), Vec::new()));
+        }
+        if let Ok(mut running) = self.running_apps.lock() {
+            running.remove(&app.id);
         }
 
         if !errors.is_empty() {
@@ -197,4 +248,3 @@ impl AppImageLauncher {
         Ok(target)
     }
 }
-

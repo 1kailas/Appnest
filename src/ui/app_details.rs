@@ -9,10 +9,13 @@ pub struct AppDetailsWidget {
     pub icon_image: Image,
     pub name_label: Label,
     pub version_label: Label,
+    pub description_label: Label,
+    pub status_badge: Label,
     pub arch_badge: Label,
     pub type_badge: Label,
     pub extracted_badge: Label,
     pub launch_btn: Button,
+    pub launch_content: libadwaita::ButtonContent,
     pub reveal_btn: Button,
     pub extract_btn: Button,
     pub uninstall_btn: Button,
@@ -30,7 +33,6 @@ pub struct AppDetailsWidget {
     pub current_app_id: Option<String>,
     pub is_running: std::cell::Cell<bool>,
 }
-
 
 impl AppDetailsWidget {
     pub fn new() -> Self {
@@ -67,10 +69,17 @@ impl AppDetailsWidget {
         let name_label = Label::builder()
             .label("Select an Application")
             .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk4::pango::WrapMode::WordChar)
             .build();
         name_label.add_css_class("title-1");
 
-        let version_label = Label::builder().label("").xalign(0.0).build();
+        let version_label = Label::builder()
+            .label("")
+            .xalign(0.0)
+            .single_line_mode(true)
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .build();
         version_label.add_css_class("dim-label");
 
         let badges_box = Box::builder()
@@ -78,6 +87,10 @@ impl AppDetailsWidget {
             .spacing(8)
             .margin_top(4)
             .build();
+
+        let status_badge = Label::builder().label("Ready").build();
+        status_badge.add_css_class("pill-badge");
+        status_badge.add_css_class("badge-neutral");
 
         let arch_badge = Label::builder().build();
         arch_badge.add_css_class("pill-badge");
@@ -92,55 +105,69 @@ impl AppDetailsWidget {
         extracted_badge.add_css_class("badge-warning");
         extracted_badge.set_visible(false);
 
+        badges_box.append(&status_badge);
         badges_box.append(&arch_badge);
         badges_box.append(&type_badge);
         badges_box.append(&extracted_badge);
 
+        let description_label = Label::builder()
+            .label("")
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk4::pango::WrapMode::WordChar)
+            .margin_top(4)
+            .visible(false)
+            .build();
+        description_label.add_css_class("dim-label");
+
         title_box.append(&name_label);
         title_box.append(&version_label);
         title_box.append(&badges_box);
+        title_box.append(&description_label);
         header_box.append(&title_box);
         root_box.append(&header_box);
 
-        // Actions Row (Launch, Reveal, Extract, Uninstall)
+        // Actions Row (Launch, Reveal in Files, Uninstall)
         let actions_box = Box::builder()
             .orientation(Orientation::Horizontal)
             .spacing(10)
             .margin_top(8)
             .build();
 
-        let launch_btn = Button::builder()
+        let launch_content = libadwaita::ButtonContent::builder()
             .label("Launch")
             .icon_name("media-playback-start-symbolic")
+            .build();
+        let launch_btn = Button::builder()
+            .child(&launch_content)
             .hexpand(true)
             .build();
         launch_btn.add_css_class("suggested-action");
         launch_btn.add_css_class("pill");
 
-        let reveal_btn = Button::builder()
-            .label("Reveal File")
+        let reveal_content = libadwaita::ButtonContent::builder()
+            .label("Reveal in Files")
             .icon_name("folder-open-symbolic")
+            .build();
+        let reveal_btn = Button::builder()
+            .child(&reveal_content)
             .tooltip_text("Open folder in file manager")
             .build();
         reveal_btn.add_css_class("pill");
 
-        let extract_btn = Button::builder()
-            .label("Extract AppDir")
-            .icon_name("system-run-symbolic")
-            .tooltip_text("Extract SquashFS for guaranteed execution fallback")
-            .build();
-        extract_btn.add_css_class("pill");
-
-        let uninstall_btn = Button::builder()
+        let uninstall_content = libadwaita::ButtonContent::builder()
             .label("Remove")
             .icon_name("user-trash-symbolic")
+            .build();
+        let uninstall_btn = Button::builder()
+            .child(&uninstall_content)
+            .tooltip_text("Remove application and shortcuts")
             .build();
         uninstall_btn.add_css_class("destructive-action");
         uninstall_btn.add_css_class("pill");
 
         actions_box.append(&launch_btn);
         actions_box.append(&reveal_btn);
-        actions_box.append(&extract_btn);
         actions_box.append(&uninstall_btn);
         root_box.append(&actions_box);
 
@@ -151,7 +178,10 @@ impl AppDetailsWidget {
             .build();
 
         // Path row
-        let path_row = ActionRow::builder().title("File Location").build();
+        let path_row = ActionRow::builder()
+            .title("File Location")
+            .subtitle_lines(2)
+            .build();
         let copy_path_btn = Button::builder()
             .icon_name("edit-copy-symbolic")
             .valign(Align::Center)
@@ -175,9 +205,9 @@ impl AppDetailsWidget {
 
         root_box.append(&details_group);
 
-        // Group 2: Execution & Security
+        // Group 2: Execution & Desktop
         let exec_group = PreferencesGroup::builder()
-            .title("Execution &amp; Security")
+            .title("Execution &amp; Desktop Integration")
             .margin_top(12)
             .build();
 
@@ -190,7 +220,7 @@ impl AppDetailsWidget {
         ]);
         let runtime_combo = ComboRow::builder()
             .title("Launch Method")
-            .subtitle("Controls execution strategy (extracted bypasses kernel binfmt interception)")
+            .subtitle("Execution strategy for running the AppImage")
             .model(&runtime_methods)
             .build();
         exec_group.add(&runtime_combo);
@@ -198,19 +228,46 @@ impl AppDetailsWidget {
         // Desktop integration switch
         let desktop_switch = SwitchRow::builder()
             .title("Desktop Integration")
-            .subtitle("Add to application launcher, dock, and system search")
+            .subtitle("Create desktop shortcut and menu launcher")
             .build();
         exec_group.add(&desktop_switch);
 
+        // AppDir extraction row
+        let extract_row = ActionRow::builder()
+            .title("Extracted AppDir")
+            .subtitle("Extract contents for FUSE-free execution")
+            .subtitle_lines(2)
+            .build();
+        let extract_btn = Button::builder()
+            .label("Extract AppDir")
+            .icon_name("system-run-symbolic")
+            .valign(Align::Center)
+            .build();
+        extract_btn.add_css_class("pill");
+        extract_row.add_suffix(&extract_btn);
+        exec_group.add(&extract_row);
+
         // Command Preview row
-        let cmd_preview_row = ActionRow::builder().title("Execution Command").build();
+        let cmd_preview_row = ActionRow::builder()
+            .title("Execution Command")
+            .subtitle_lines(2)
+            .build();
         cmd_preview_row.add_css_class("code-row");
         exec_group.add(&cmd_preview_row);
+
+        root_box.append(&exec_group);
+
+        // Group 3: Integrity & Security
+        let sec_group = PreferencesGroup::builder()
+            .title("Integrity &amp; Security")
+            .margin_top(12)
+            .build();
 
         // SHA-256 Checksum row
         let hash_row = ActionRow::builder()
             .title("SHA-256 Checksum")
             .subtitle("Click compute to verify file integrity")
+            .subtitle_lines(2)
             .build();
         hash_row.add_css_class("code-row");
         let compute_hash_btn = Button::builder()
@@ -230,9 +287,9 @@ impl AppDetailsWidget {
 
         hash_row.add_suffix(&compute_hash_btn);
         hash_row.add_suffix(&copy_hash_btn);
-        exec_group.add(&hash_row);
+        sec_group.add(&hash_row);
 
-        root_box.append(&exec_group);
+        root_box.append(&sec_group);
 
         let scrolled = ScrolledWindow::builder()
             .hscrollbar_policy(gtk4::PolicyType::Never)
@@ -247,10 +304,13 @@ impl AppDetailsWidget {
             icon_image,
             name_label,
             version_label,
+            description_label,
+            status_badge,
             arch_badge,
             type_badge,
             extracted_badge,
             launch_btn,
+            launch_content,
             reveal_btn,
             extract_btn,
             uninstall_btn,
@@ -269,7 +329,6 @@ impl AppDetailsWidget {
             is_running: std::cell::Cell::new(false),
         }
     }
-
 
     pub fn update(&mut self, app: &AppImage) {
         self.current_app_id = Some(app.id.clone());
@@ -299,21 +358,24 @@ impl AppDetailsWidget {
 
         // Update Labels
         self.name_label.set_label(&app.name);
-        let sub = match &app.version {
-            Some(v) => {
-                if let Some(ref comment) = app.metadata.comment {
-                    format!("v{} • {}", v, comment)
-                } else {
-                    format!("Version {}", v)
-                }
-            }
-            None => app
-                .metadata
-                .comment
-                .clone()
-                .unwrap_or_else(|| "Version unknown".to_string()),
+
+        let ver_str = match &app.version {
+            Some(v) => format!("v{} • {}", v, app.formatted_size()),
+            None => app.formatted_size(),
         };
-        self.version_label.set_label(&sub);
+        self.version_label.set_label(&ver_str);
+
+        if let Some(ref comment) = app.metadata.comment {
+            let trimmed = comment.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case(&app.name) {
+                self.description_label.set_label(trimmed);
+                self.description_label.set_visible(true);
+            } else {
+                self.description_label.set_visible(false);
+            }
+        } else {
+            self.description_label.set_visible(false);
+        }
 
         // Update Badges
         self.arch_badge.set_label(&app.architecture.to_string());
@@ -377,19 +439,27 @@ impl AppDetailsWidget {
     pub fn set_running_state(&self, running: bool) {
         self.is_running.set(running);
         if running {
-            self.launch_btn.set_label("Close");
-            self.launch_btn.set_icon_name("window-close-symbolic");
+            self.status_badge.set_label("Running");
+            self.status_badge.remove_css_class("badge-neutral");
+            self.status_badge.add_css_class("badge-running");
+
+            self.launch_content.set_label("Close Application");
+            self.launch_content.set_icon_name("window-close-symbolic");
             self.launch_btn.remove_css_class("suggested-action");
             self.launch_btn.add_css_class("destructive-action");
             self.launch_btn
                 .set_tooltip_text(Some("Close running application"));
         } else {
-            self.launch_btn.set_label("Launch");
-            self.launch_btn.set_icon_name("media-playback-start-symbolic");
+            self.status_badge.set_label("Ready");
+            self.status_badge.remove_css_class("badge-running");
+            self.status_badge.add_css_class("badge-neutral");
+
+            self.launch_content.set_label("Launch");
+            self.launch_content
+                .set_icon_name("media-playback-start-symbolic");
             self.launch_btn.remove_css_class("destructive-action");
             self.launch_btn.add_css_class("suggested-action");
             self.launch_btn.set_tooltip_text(Some("Launch application"));
         }
     }
 }
-

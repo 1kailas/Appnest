@@ -32,7 +32,10 @@ impl RemoveAppImageCommand {
 
             // Remove desktop integration
             let _ = DesktopEntryService::remove_entry(&app, &self.paths.desktop_applications_dir);
-
+            DesktopEntryService::remove_user_desktop_shortcut(
+                &app,
+                self.paths.user_desktop_dir.as_deref(),
+            );
 
             // Remove extracted folder if exists
             let extracted = self.paths.app_extracted_dir(&app.id);

@@ -1,5 +1,5 @@
 Name:           appnest
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Modern AppImage manager built with Rust, GTK4, and Libadwaita
 
@@ -54,5 +54,8 @@ appstreamcli validate --no-net %{buildroot}%{_datadir}/metainfo/io.github._1kail
 %{_datadir}/metainfo/io.github._1kailas.AppNest.metainfo.xml
 
 %changelog
+* Thu Oct 01 2026 1kailas <1kailas@users.noreply.github.com> - 0.2.0-1
+- File manager integration, desktop shortcuts, process tracking, and UI improvements
+
 * Wed Sep 09 2026 1kailas <1kailas@users.noreply.github.com> - 0.1.0-1
 - Initial release of AppNest for Fedora / DNF

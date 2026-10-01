@@ -28,6 +28,11 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.0" date="2026-10-01">
+      <description>
+        <p>File manager integration, desktop shortcuts creation, dynamic app process monitoring and termination, layout improvements, and performance optimizations.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-09">
       <description>
         <p>Initial release of AppNest with adaptive runtime, drag-and-drop, and Libadwaita UI.</p>

@@ -1,8 +1,8 @@
 use std::ffi::OsStr;
-use std::path::Path;
-use std::process::{Command, Stdio};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 pub struct ProcessLauncher;
 
@@ -51,11 +51,20 @@ impl ProcessLauncher {
     }
 
     pub fn is_pid_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
         let status_path = format!("/proc/{}/status", pid);
         if let Ok(content) = std::fs::read_to_string(&status_path) {
             for line in content.lines() {
-                if line.starts_with("State:") {
-                    // If zombie (Z) or dead (X), it is not running
+                if let Some(state_val) = line.strip_prefix("State:\t") {
+                    if let Some(first_char) = state_val.trim().chars().next() {
+                        if first_char == 'Z' || first_char == 'X' {
+                            return false;
+                        }
+                    }
+                    return true;
+                } else if line.starts_with("State:") {
                     if line.contains('Z') || line.contains('X') {
                         return false;
                     }
@@ -69,6 +78,9 @@ impl ProcessLauncher {
     }
 
     pub fn terminate_pid(pid: u32) -> Result<(), std::io::Error> {
+        if pid == 0 {
+            return Ok(());
+        }
         #[cfg(unix)]
         unsafe {
             let pid_i32 = pid as libc::pid_t;
@@ -93,9 +105,14 @@ impl ProcessLauncher {
     pub fn find_pids_for_appimage(app_path: &Path, apprun_path: Option<&Path>) -> Vec<u32> {
         let mut pids = Vec::new();
         let current_pid = std::process::id();
-        let full_path_str = app_path.to_string_lossy();
-        let file_name = app_path.file_name().map(|n| n.to_string_lossy().to_string());
-        let apprun_str = apprun_path.map(|p| p.to_string_lossy().to_string());
+        let canonical_app_path = std::fs::canonicalize(app_path).ok();
+        let app_path_str = app_path.to_string_lossy();
+        let target_env = format!("APPIMAGE={}", app_path_str);
+        let target_env_canonical = canonical_app_path
+            .as_ref()
+            .map(|p| format!("APPIMAGE={}", p.to_string_lossy()));
+
+        let canonical_apprun = apprun_path.and_then(|p| std::fs::canonicalize(p).ok());
 
         let proc_dir = match std::fs::read_dir("/proc") {
             Ok(d) => d,
@@ -106,41 +123,69 @@ impl ProcessLauncher {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if let Ok(pid) = name_str.parse::<u32>() {
-                if pid == current_pid || !Self::is_pid_alive(pid) {
+                if pid == current_pid || pid == 0 || !Self::is_pid_alive(pid) {
                     continue;
                 }
 
                 let mut matched = false;
 
-                // 1. Check cmdline
-                let cmdline_path = entry.path().join("cmdline");
-                if let Ok(cmdline_bytes) = std::fs::read(&cmdline_path) {
-                    let cmdline_str = String::from_utf8_lossy(&cmdline_bytes);
-                    if cmdline_str.contains(&*full_path_str) {
+                // 1. Check /proc/<pid>/exe symlink
+                let exe_link = entry.path().join("exe");
+                if let Ok(target) = std::fs::read_link(&exe_link) {
+                    if target == app_path
+                        || canonical_app_path.as_ref().map_or(false, |p| *p == target)
+                    {
                         matched = true;
-                    } else if let Some(ref apprun) = apprun_str {
-                        if cmdline_str.contains(apprun) {
+                    } else if let Some(ref apprun) = canonical_apprun {
+                        if target == *apprun {
                             matched = true;
                         }
-                    } else if let Some(ref fname) = file_name {
-                        for arg in cmdline_bytes.split(|&b| b == 0) {
-                            let arg_str = String::from_utf8_lossy(arg);
-                            if arg_str == *fname || arg_str.ends_with(&format!("/{}", fname)) {
-                                matched = true;
-                                break;
+                    } else if let Some(apprun) = apprun_path {
+                        if target == apprun {
+                            matched = true;
+                        }
+                    }
+                }
+
+                // 2. Check /proc/<pid>/environ for exact APPIMAGE=<path> item
+                if !matched {
+                    let environ_path = entry.path().join("environ");
+                    if let Ok(environ_bytes) = std::fs::read(&environ_path) {
+                        for var in environ_bytes.split(|&b| b == 0) {
+                            if let Ok(var_str) = std::str::from_utf8(var) {
+                                if var_str == target_env
+                                    || target_env_canonical.as_deref() == Some(var_str)
+                                {
+                                    matched = true;
+                                    break;
+                                }
                             }
                         }
                     }
                 }
 
-                // 2. Check environ for APPIMAGE=
+                // 3. Check /proc/<pid>/cmdline: Only match the FIRST argument (argv[0])
                 if !matched {
-                    let environ_path = entry.path().join("environ");
-                    if let Ok(environ_bytes) = std::fs::read(&environ_path) {
-                        let environ_str = String::from_utf8_lossy(&environ_bytes);
-                        let target_env = format!("APPIMAGE={}", full_path_str);
-                        if environ_str.contains(&target_env) {
-                            matched = true;
+                    let cmdline_path = entry.path().join("cmdline");
+                    if let Ok(cmdline_bytes) = std::fs::read(&cmdline_path) {
+                        if let Some(argv0_bytes) = cmdline_bytes.split(|&b| b == 0).next() {
+                            let argv0 = String::from_utf8_lossy(argv0_bytes);
+                            let argv0_path = Path::new(&*argv0);
+                            if argv0_path == app_path
+                                || canonical_app_path
+                                    .as_ref()
+                                    .map_or(false, |p| p.as_path() == argv0_path)
+                            {
+                                matched = true;
+                            } else if let Some(apprun) = apprun_path {
+                                if argv0_path == apprun
+                                    || canonical_apprun
+                                        .as_ref()
+                                        .map_or(false, |p| p.as_path() == argv0_path)
+                                {
+                                    matched = true;
+                                }
+                            }
                         }
                     }
                 }
@@ -173,4 +218,3 @@ impl ProcessLauncher {
         Ok(())
     }
 }
-

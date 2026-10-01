@@ -12,6 +12,7 @@ pub struct AppPaths {
     pub config_file: PathBuf,
     pub cache_dir: PathBuf,
     pub desktop_applications_dir: PathBuf,
+    pub user_desktop_dir: Option<PathBuf>,
 }
 
 impl Default for AppPaths {
@@ -88,6 +89,11 @@ impl AppPaths {
         let database_file = data_dir.join("apps.toml");
         let config_file = config_dir.join("config.toml");
 
+        let user_desktop_dir = base_dirs
+            .as_ref()
+            .map(|b| b.home_dir().join("Desktop"))
+            .filter(|p| p.is_dir());
+
         Self {
             data_dir,
             applications_dir,
@@ -98,6 +104,7 @@ impl AppPaths {
             config_file,
             cache_dir,
             desktop_applications_dir,
+            user_desktop_dir,
         }
     }
 

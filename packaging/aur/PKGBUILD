@@ -1,6 +1,6 @@
 # Maintainer: Kailasnath T <00kailas000@gmail.com>
 pkgname=appnest
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="A clean, modern AppImage manager built with Rust, GTK4, and Libadwaita"
 arch=('x86_64' 'aarch64')

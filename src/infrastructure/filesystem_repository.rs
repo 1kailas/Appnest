@@ -75,7 +75,17 @@ impl FilesystemAppImageRepository {
 
 impl AppImageRepository for FilesystemAppImageRepository {
     fn list(&self) -> Result<Vec<AppImage>, AppImageError> {
+        // Fast path: check cache with read lock (avoids write contention)
+        {
+            let cache_guard = self.cache.read().unwrap();
+            if let Some(ref cached) = *cache_guard {
+                return Ok(cached.clone());
+            }
+        }
+
+        // Cache miss: load from disk under write lock
         let mut cache_guard = self.cache.write().unwrap();
+        // Double-check after acquiring write lock (another thread may have populated)
         if let Some(ref cached) = *cache_guard {
             return Ok(cached.clone());
         }
