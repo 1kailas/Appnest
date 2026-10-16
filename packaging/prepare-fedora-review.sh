@@ -20,7 +20,7 @@ if [ ${#MISSING_TOOLS[@]} -ne 0 ]; then
     echo "⚠️  Missing required Fedora review tools: ${MISSING_TOOLS[*]}"
     echo "Please run the following command in your terminal with your password:"
     echo ""
-    echo "  sudo dnf install -y fedora-packager rpmdevtools rpmlint mock fedora-review"
+    echo "  sudo dnf install -y fedora-packager rpmdevtools rpmlint mock fedora-review cargo-rpm-macros"
     echo ""
     exit 1
 fi

@@ -7,8 +7,7 @@ License:        GPL-3.0-or-later
 URL:            https://github.com/1kailas/appnest
 Source0:        https://github.com/1kailas/%{name}/archive/v%{version}/%{name}-%{version}.tar.gz
 
-BuildRequires:  rust >= 1.80
-BuildRequires:  cargo
+BuildRequires:  cargo-rpm-macros >= 24
 BuildRequires:  pkgconfig(gtk4) >= 4.10
 BuildRequires:  pkgconfig(libadwaita-1) >= 1.4
 BuildRequires:  desktop-file-utils
@@ -29,29 +28,35 @@ automatic .desktop integration, SHA-256 integrity verification, and
 custom per-application environment and launch arguments.
 
 %prep
-%autosetup
+%autosetup -p1
+%cargo_prep
+
+%generate_buildrequires
+%cargo_generate_buildrequires
 
 %build
-cargo build --release
+%cargo_build
+%{cargo_license_summary}
+%{cargo_license} > LICENSE.dependencies
 
 %install
-rm -rf %{buildroot}
-install -Dpm 0755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
+install -Dpm 0755 target/rpm/%{name} %{buildroot}%{_bindir}/%{name}
 install -Dpm 0644 resources/icons/io.github._1kailas.AppNest.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/io.github._1kailas.AppNest.svg
 install -Dpm 0644 packaging/io.github._1kailas.AppNest.desktop %{buildroot}%{_datadir}/applications/io.github._1kailas.AppNest.desktop
-install -Dpm 0644 resources/io.github._1kailas.AppNest.metainfo.xml %{buildroot}%{_datadir}/metainfo/io.github._1kailas.AppNest.metainfo.xml
+install -Dpm 0644 resources/io.github._1kailas.AppNest.metainfo.xml %{buildroot}%{_metainfodir}/io.github._1kailas.AppNest.metainfo.xml
 
 %check
 desktop-file-validate %{buildroot}%{_datadir}/applications/io.github._1kailas.AppNest.desktop
-appstreamcli validate --no-net %{buildroot}%{_datadir}/metainfo/io.github._1kailas.AppNest.metainfo.xml
+appstream-util validate-relax --nonet %{buildroot}%{_metainfodir}/io.github._1kailas.AppNest.metainfo.xml
 
 %files
 %license LICENSE
+%license LICENSE.dependencies
 %doc README.md
 %{_bindir}/%{name}
 %{_datadir}/applications/io.github._1kailas.AppNest.desktop
 %{_datadir}/icons/hicolor/scalable/apps/io.github._1kailas.AppNest.svg
-%{_datadir}/metainfo/io.github._1kailas.AppNest.metainfo.xml
+%{_metainfodir}/io.github._1kailas.AppNest.metainfo.xml
 
 %changelog
 * Thu Oct 01 2026 1kailas <1kailas@users.noreply.github.com> - 0.2.0-1
