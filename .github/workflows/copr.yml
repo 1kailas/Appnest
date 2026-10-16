@@ -1,0 +1,88 @@
+name: Fedora Copr Build
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - 'resources/**'
+      - 'packaging/**'
+      - 'Cargo.*'
+      - '.github/workflows/copr.yml'
+  workflow_dispatch:
+
+jobs:
+  copr-build:
+    name: Build SRPM & Submit to Copr
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+
+    steps:
+      - name: Install build tools and copr-cli
+        run: |
+          dnf install -y git tar rpm-build rpmdevtools copr-cli
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build Source RPM (SRPM)
+        id: build_srpm
+        run: |
+          VERSION=$(grep -m1 '^Version:' packaging/rpm/appnest.spec | awk '{print $2}')
+          NAME="appnest"
+          echo "Building SRPM for ${NAME} v${VERSION}..."
+
+          mkdir -p "${HOME}/rpmbuild/SOURCES" "${HOME}/rpmbuild/SPECS" "${HOME}/rpmbuild/SRPMS"
+
+          # Create source tarball
+          tar \
+            --exclude-vcs \
+            --exclude='./target' \
+            --exclude='./rpmbuild' \
+            --transform "s,^\.,${NAME}-${VERSION}," \
+            -czf "${HOME}/rpmbuild/SOURCES/${NAME}-${VERSION}.tar.gz" \
+            .
+
+          cp "packaging/rpm/${NAME}.spec" "${HOME}/rpmbuild/SPECS/${NAME}.spec"
+
+          # Build SRPM
+          rpmbuild -bs "${HOME}/rpmbuild/SPECS/${NAME}.spec"
+
+          SRPM_FILE=$(find "${HOME}/rpmbuild/SRPMS" -name "${NAME}-${VERSION}-*.src.rpm" | head -n 1)
+          echo "Built SRPM: ${SRPM_FILE}"
+
+          mkdir -p dist
+          cp "${SRPM_FILE}" dist/
+          echo "srpm_path=dist/$(basename "${SRPM_FILE}")" >> "$GITHUB_OUTPUT"
+          echo "srpm_name=$(basename "${SRPM_FILE}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload SRPM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build_srpm.outputs.srpm_name }}
+          path: ${{ steps.build_srpm.outputs.srpm_path }}
+          if-no-files-found: error
+
+      - name: Submit to Fedora Copr
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+        run: |
+          if [ -z "${COPR_CONFIG}" ]; then
+            echo "::warning title=COPR_CONFIG Not Found::The COPR_CONFIG secret is not set in GitHub repository secrets. To enable automated uploads, add your Copr API configuration as secret 'COPR_CONFIG' in Repository Settings -> Secrets and variables -> Actions."
+            echo "Skipping upload to Copr (SRPM was successfully built and attached as an artifact)."
+            exit 0
+          fi
+
+          mkdir -p ~/.config
+          cat << 'EOF' > ~/.config/copr
+          ${{ secrets.COPR_CONFIG }}
+          EOF
+          chmod 600 ~/.config/copr
+
+          echo "==> Submitting build to Fedora Copr (kailaz/appnest)..."
+          copr-cli build --nowait kailaz/appnest "${{ steps.build_srpm.outputs.srpm_path }}"
+          echo "✅ Build successfully triggered on Fedora Copr!"
