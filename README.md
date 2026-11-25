@@ -71,7 +71,7 @@ A calculated SHA-256 only tells you the file's hash. It is not a statement that 
 ```bash
 # Fedora
 sudo dnf install cargo gtk4-devel libadwaita-devel 7zip
-# Debian/Ubuntu 24.04
+# Debian unstable/testing (or Ubuntu with rustup, since Ubuntu LTS rustc is too old)
 sudo apt install cargo libgtk-4-dev libadwaita-1-dev 7zip
 
 cargo build --release --locked
@@ -157,9 +157,10 @@ dpkg-buildpackage -us -uc -b
 ```
 
 This currently requires Debian unstable/testing or a release whose gtk-rs crates
-are new enough (libadwaita-rs 0.9+). Ubuntu 24.04 LTS is too old; build from
-source there instead. AppNest is **not yet in the official Debian or Ubuntu
-archives**; inclusion would need a Debian maintainer to adopt the package.
+are new enough (libadwaita-rs 0.9+, rustc 1.92+). Ubuntu 24.04 LTS is too old for
+both this and a plain source build — use rustup there. AppNest is **not yet in
+the official Debian or Ubuntu archives**; inclusion would need a Debian
+maintainer to adopt the package.
 
 ## Contributing
 
