@@ -14,6 +14,6 @@ pkgbase = appnest
 	depends = libadwaita
 	depends = 7zip
 	source = appnest-0.3.0.tar.gz::https://github.com/1kailas/Appnest/archive/refs/tags/v0.3.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 77f5ca7cf0cf92910e1b29f5eda0add0c74a91dc133e975ade59ba9efb67313b
 
 pkgname = appnest
