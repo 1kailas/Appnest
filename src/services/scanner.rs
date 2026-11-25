@@ -1,26 +1,29 @@
+use crate::services::validator::AppImageValidator;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub struct AppImageScanner;
 
 impl AppImageScanner {
+    /// Finds valid AppImages below `dir`. The extension only selects candidates; every
+    /// candidate must also pass full validation.
     pub fn scan_directory(dir: &Path, max_depth: usize) -> Vec<PathBuf> {
-        if !dir.exists() || !dir.is_dir() {
+        if !dir.is_dir() {
             return Vec::new();
         }
 
-        let mut results = Vec::new();
-        for entry in WalkDir::new(dir).max_depth(max_depth).into_iter().flatten() {
-            if entry.file_type().is_file() {
-                let path = entry.path();
-                if let Some(ext) = path.extension() {
-                    if ext.to_string_lossy().eq_ignore_ascii_case("appimage") {
-                        results.push(path.to_path_buf());
-                    }
-                }
-            }
-        }
-        results
+        WalkDir::new(dir)
+            .max_depth(max_depth)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
+                    && AppImageValidator::validate(p).is_ok()
+            })
+            .collect()
     }
 
     pub fn scan_multiple(directories: &[PathBuf]) -> Vec<PathBuf> {

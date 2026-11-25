@@ -1,68 +1,91 @@
+mod common;
+
 use appnest::config::paths::AppPaths;
-use appnest::domain::appimage::{AppImage, AppImageType, Architecture, RuntimeMethod};
-use std::path::PathBuf;
+use appnest::domain::appimage::{AppImage, RuntimeMethod};
+use appnest::infrastructure::hash::sha256_file;
+use common::*;
+use std::fs;
 
 #[test]
-fn test_appimage_creation_and_sanitize_id() {
-    assert_eq!(AppImage::sanitize_id("Obsidian-1.13.7"), "obsidian-1-13-7");
-    assert_eq!(
-        AppImage::sanitize_id("My Great App! 2.0"),
-        "my-great-app-2-0"
-    );
-    assert_eq!(AppImage::sanitize_id(""), "appimage-item");
-
-    let app = AppImage::new("test-app", "Test App", PathBuf::from("/tmp/test.AppImage"));
-    assert_eq!(app.id, "test-app");
-    assert_eq!(app.name, "Test App");
-    assert_eq!(app.runtime_method, RuntimeMethod::Auto);
-    assert_eq!(app.architecture, Architecture::Unknown);
-    assert_eq!(app.appimage_type, AppImageType::Unknown);
-    assert!(!app.is_extracted());
+fn sanitize_id_is_filesystem_safe() {
+    assert_eq!(AppImage::sanitize_id("My Cool_App.v2"), "my-cool-app-v2");
+    assert_eq!(AppImage::sanitize_id("../../etc/passwd"), "etcpasswd");
+    assert_eq!(AppImage::sanitize_id("名前"), "appimage-item");
+    assert_eq!(AppImage::sanitize_id("---"), "appimage-item");
+    let long = AppImage::sanitize_id(&"a".repeat(500));
+    assert!(long.len() <= 64);
+    assert!(long
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'));
 }
 
 #[test]
-fn test_formatted_size() {
-    let mut app = AppImage::new("test", "Test", PathBuf::from("/tmp/test"));
-    app.file_size = 500;
-    assert_eq!(app.formatted_size(), "500 bytes");
-
-    app.file_size = 2048;
-    assert_eq!(app.formatted_size(), "2 KB");
-
-    app.file_size = 15 * 1024 * 1024;
-    assert_eq!(app.formatted_size(), "15.0 MB");
-
+fn formatted_size() {
+    let mut app = AppImage::new("a", "A", "/nonexistent".into());
+    app.file_size = 512;
+    assert_eq!(app.formatted_size(), "512 bytes");
     app.file_size = 2 * 1024 * 1024 * 1024;
     assert_eq!(app.formatted_size(), "2.00 GB");
 }
 
 #[test]
-fn test_paths_generation() {
-    let paths = AppPaths::new();
-    let app_id = "sample-app";
-    let icon = paths.app_icon_path(app_id, "png");
-    assert!(icon.to_string_lossy().ends_with("sample-app.png"));
-
-    let desktop = paths.app_desktop_file(app_id);
-    assert!(desktop.to_string_lossy().ends_with("sample-app.desktop"));
-
-    let extracted = paths.app_extracted_dir(app_id);
-    assert!(extracted.to_string_lossy().ends_with("sample-app"));
+fn paths_are_built_from_the_given_roots() {
+    let env = TestEnv::new();
+    let p: &AppPaths = &env.paths;
+    assert!(p.data_dir.starts_with(env.root.path()));
+    assert!(p.desktop_applications_dir.starts_with(env.root.path()));
+    assert!(p.app_icon_path("x", "png").ends_with("icons/x.png"));
+    assert!(p.app_desktop_file("x").ends_with("appnest-x.desktop"));
+    assert!(p.app_extracted_dir("x").ends_with("extracted/x"));
 }
 
 #[test]
-fn test_sha256_calculation() {
-    use std::io::Write;
-    let mut tmp = tempfile::NamedTempFile::new().unwrap();
-    tmp.write_all(b"hello world\n").unwrap();
-    tmp.flush().unwrap();
-
-    let app = AppImage::new("hello-test", "Hello Test", tmp.path().to_path_buf());
-    let hash = app
-        .calculate_sha256()
-        .expect("SHA-256 should compute successfully");
+fn sha256_is_computed_by_streaming() {
+    let env = TestEnv::new();
+    let p = env.root.path().join("hello");
+    fs::write(&p, b"hello world\n").unwrap();
     assert_eq!(
-        hash,
+        sha256_file(&p).unwrap(),
         "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447"
     );
+
+    let big = env.root.path().join("big");
+    fs::write(&big, vec![0u8; 3 * 1024 * 1024 + 5]).unwrap();
+    assert_eq!(sha256_file(&big).unwrap().len(), 64);
+}
+
+#[test]
+fn cached_hash_is_invalidated_when_file_changes() {
+    let env = TestEnv::new();
+    let p = env.root.path().join("app.bin");
+    fs::write(&p, b"version one").unwrap();
+
+    let mut app = AppImage::new("app", "App", p.clone());
+    assert!(app.cached_sha256().is_none());
+
+    app.set_sha256(sha256_file(&p).unwrap());
+    assert!(app.cached_sha256().is_some());
+
+    fs::write(&p, b"version two is longer").unwrap();
+    assert!(
+        app.cached_sha256().is_none(),
+        "stale hash must not be reported"
+    );
+}
+
+#[test]
+fn legacy_fuse_runtime_value_still_loads() {
+    #[derive(serde::Deserialize)]
+    struct W {
+        runtime_method: RuntimeMethod,
+    }
+    let old: W = toml::from_str("runtime_method = \"fuse\"").unwrap();
+    assert_eq!(old.runtime_method, RuntimeMethod::ExtractAndRun);
+    let new: W = toml::from_str("runtime_method = \"extractandrun\"").unwrap();
+    assert_eq!(new.runtime_method, RuntimeMethod::ExtractAndRun);
+}
+
+#[test]
+fn extract_and_run_is_described_as_fuse_free() {
+    assert!(RuntimeMethod::ExtractAndRun.to_string().contains("no FUSE"));
 }

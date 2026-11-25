@@ -1,204 +1,269 @@
-use std::ffi::OsStr;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-use std::path::Path;
+use gio::prelude::*;
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
+
+/// A process identity: the PID plus its start time, so a recycled PID is never mistaken
+/// for the process that was originally launched or discovered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProcId {
+    pub pid: u32,
+    pub start_time: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExitInfo {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
+impl ExitInfo {
+    pub fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
+impl std::fmt::Display for ExitInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.code, self.signal) {
+            (Some(c), _) => write!(f, "exit code {}", c),
+            (None, Some(s)) => write!(f, "signal {}", s),
+            _ => write!(f, "unknown status"),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SpawnOptions {
+    pub env: Vec<(OsString, OsString)>,
+    pub cwd: Option<PathBuf>,
+    /// Regular file that receives the process's stderr. A file (not a pipe) is used so the
+    /// application keeps running normally after AppNest exits.
+    pub stderr_log: Option<PathBuf>,
+}
+
+pub struct SpawnedProcess {
+    pub id: ProcId,
+    exit_rx: Receiver<ExitInfo>,
+}
+
+impl SpawnedProcess {
+    /// Waits up to `timeout` for the process to exit. `None` means it is still running.
+    pub fn wait_for_exit(&self, timeout: Duration) -> Option<ExitInfo> {
+        self.exit_rx.recv_timeout(timeout).ok()
+    }
+}
+
+pub struct ScanTarget {
+    pub id: String,
+    pub app_path: PathBuf,
+    pub apprun_path: Option<PathBuf>,
+}
 
 pub struct ProcessLauncher;
 
 impl ProcessLauncher {
-    pub fn spawn_detached<I, S>(
+    /// Starts a process in its own process group and reaps it in a background thread.
+    pub fn spawn(
         program: &Path,
-        args: I,
-        working_dir: Option<&Path>,
-    ) -> std::io::Result<u32>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
+        args: &[OsString],
+        opts: &SpawnOptions,
+    ) -> std::io::Result<SpawnedProcess> {
         let mut cmd = Command::new(program);
-        cmd.args(args);
-
-        if let Some(dir) = working_dir {
+        cmd.args(args).envs(opts.env.iter().map(|(k, v)| (k, v)));
+        if let Some(dir) = &opts.cwd {
             cmd.current_dir(dir);
-        } else if let Some(parent) = program.parent() {
-            cmd.current_dir(parent);
+        }
+        cmd.process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null());
+        match &opts.stderr_log {
+            Some(log) => {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(log)?;
+                cmd.stderr(Stdio::from(file));
+            }
+            None => {
+                cmd.stderr(Stdio::null());
+            }
         }
 
-        // Put process into its own process group so all subprocesses can be signaled together
-        #[cfg(unix)]
-        cmd.process_group(0);
+        let mut child = cmd.spawn()?;
+        let pid = child.id();
+        // The child is not reaped yet, so its PID cannot have been reused.
+        let start_time = Self::proc_start_time(pid).unwrap_or(0);
 
-        // Detach process so GUI application doesn't lock up or kill the app when closed
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("appnest-reaper".into())
+            .spawn(move || {
+                if let Ok(status) = child.wait() {
+                    let _ = tx.send(ExitInfo {
+                        code: status.code(),
+                        signal: status.signal(),
+                    });
+                }
+            })?;
 
-        let child = cmd.spawn()?;
-        Ok(child.id())
+        Ok(SpawnedProcess {
+            id: ProcId { pid, start_time },
+            exit_rx: rx,
+        })
     }
 
-    pub fn run_sync<I, S>(program: &Path, args: I) -> std::io::Result<(bool, String, String)>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let output = Command::new(program).args(args).output()?;
-        let success = output.status.success();
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Ok((success, stdout, stderr))
+    /// Reads the process state character and start time (clock ticks since boot).
+    fn proc_stat(pid: u32) -> Option<(char, u64)> {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+        // The command name is in parentheses and may itself contain spaces or parentheses.
+        let rest = &stat[stat.rfind(')')? + 1..];
+        let mut fields = rest.split_whitespace();
+        let state = fields.next()?.chars().next()?;
+        let start = fields.nth(18)?.parse().ok()?;
+        Some((state, start))
+    }
+
+    pub fn proc_start_time(pid: u32) -> Option<u64> {
+        Self::proc_stat(pid).map(|(_, start)| start)
     }
 
     pub fn is_pid_alive(pid: u32) -> bool {
-        if pid == 0 {
-            return false;
-        }
-        let status_path = format!("/proc/{}/status", pid);
-        if let Ok(content) = std::fs::read_to_string(&status_path) {
-            for line in content.lines() {
-                if let Some(state_val) = line.strip_prefix("State:\t") {
-                    if let Some(first_char) = state_val.trim().chars().next() {
-                        if first_char == 'Z' || first_char == 'X' {
-                            return false;
-                        }
-                    }
-                    return true;
-                } else if line.starts_with("State:") {
-                    if line.contains('Z') || line.contains('X') {
-                        return false;
-                    }
-                    return true;
-                }
-            }
-            true
-        } else {
-            false
-        }
+        pid != 0 && Self::proc_stat(pid).is_some_and(|(state, _)| state != 'Z' && state != 'X')
     }
 
-    pub fn terminate_pid(pid: u32) -> Result<(), std::io::Error> {
-        if pid == 0 {
+    /// True only if the same process (same PID and start time) is still running.
+    pub fn is_alive(id: ProcId) -> bool {
+        id.pid != 0
+            && Self::proc_stat(id.pid).is_some_and(|(state, start)| {
+                start == id.start_time && state != 'Z' && state != 'X'
+            })
+    }
+
+    /// Sends SIGTERM to the process, and to its process group when `kill_group` is set and the
+    /// process leads that group. Does nothing if the identity no longer matches.
+    pub fn terminate(id: ProcId, kill_group: bool) -> std::io::Result<()> {
+        if !Self::is_alive(id) {
             return Ok(());
         }
-        #[cfg(unix)]
+        let pid = id.pid as libc::pid_t;
+        // SAFETY: plain libc calls on integer arguments.
         unsafe {
-            let pid_i32 = pid as libc::pid_t;
-            // Send SIGTERM to the process group first (negative PID)
-            let _ = libc::kill(-pid_i32, libc::SIGTERM);
-            // Also send SIGTERM directly to the PID in case it wasn't the group leader
-            let res = libc::kill(pid_i32, libc::SIGTERM);
-            if res != 0 {
+            if kill_group && libc::getpgid(pid) == pid {
+                let _ = libc::kill(-pid, libc::SIGTERM);
+            }
+            if libc::kill(pid, libc::SIGTERM) != 0 {
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() != Some(libc::ESRCH) {
                     return Err(err);
                 }
             }
-            Ok(())
         }
-        #[cfg(not(unix))]
-        {
-            Ok(())
-        }
+        Ok(())
     }
 
-    pub fn find_pids_for_appimage(app_path: &Path, apprun_path: Option<&Path>) -> Vec<u32> {
-        let mut pids = Vec::new();
-        let current_pid = std::process::id();
-        let canonical_app_path = std::fs::canonicalize(app_path).ok();
-        let app_path_str = app_path.to_string_lossy();
-        let target_env = format!("APPIMAGE={}", app_path_str);
-        let target_env_canonical = canonical_app_path
-            .as_ref()
-            .map(|p| format!("APPIMAGE={}", p.to_string_lossy()));
-
-        let canonical_apprun = apprun_path.and_then(|p| std::fs::canonicalize(p).ok());
-
-        let proc_dir = match std::fs::read_dir("/proc") {
-            Ok(d) => d,
-            Err(_) => return pids,
-        };
-
-        for entry in proc_dir.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if let Ok(pid) = name_str.parse::<u32>() {
-                if pid == current_pid || pid == 0 || !Self::is_pid_alive(pid) {
-                    continue;
+    /// Finds running processes belonging to any of the targets in a single pass over /proc.
+    /// Only processes of the current user are inspected.
+    pub fn find_running(targets: &[ScanTarget]) -> HashMap<String, Vec<ProcId>> {
+        let mut exe_map: HashMap<PathBuf, &str> = HashMap::new();
+        let mut env_map: HashMap<Vec<u8>, &str> = HashMap::new();
+        for t in targets {
+            for p in [Some(&t.app_path), t.apprun_path.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                exe_map.insert(p.clone(), &t.id);
+                if let Ok(c) = std::fs::canonicalize(p) {
+                    exe_map.insert(c, &t.id);
                 }
-
-                let mut matched = false;
-
-                // 1. Check /proc/<pid>/exe symlink
-                let exe_link = entry.path().join("exe");
-                if let Ok(target) = std::fs::read_link(&exe_link) {
-                    if target == app_path
-                        || canonical_app_path.as_ref().map_or(false, |p| *p == target)
-                    {
-                        matched = true;
-                    } else if let Some(ref apprun) = canonical_apprun {
-                        if target == *apprun {
-                            matched = true;
-                        }
-                    } else if let Some(apprun) = apprun_path {
-                        if target == apprun {
-                            matched = true;
-                        }
-                    }
-                }
-
-                // 2. Check /proc/<pid>/environ for exact APPIMAGE=<path> item
-                if !matched {
-                    let environ_path = entry.path().join("environ");
-                    if let Ok(environ_bytes) = std::fs::read(&environ_path) {
-                        for var in environ_bytes.split(|&b| b == 0) {
-                            if let Ok(var_str) = std::str::from_utf8(var) {
-                                if var_str == target_env
-                                    || target_env_canonical.as_deref() == Some(var_str)
-                                {
-                                    matched = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 3. Check /proc/<pid>/cmdline: Only match the FIRST argument (argv[0])
-                if !matched {
-                    let cmdline_path = entry.path().join("cmdline");
-                    if let Ok(cmdline_bytes) = std::fs::read(&cmdline_path) {
-                        if let Some(argv0_bytes) = cmdline_bytes.split(|&b| b == 0).next() {
-                            let argv0 = String::from_utf8_lossy(argv0_bytes);
-                            let argv0_path = Path::new(&*argv0);
-                            if argv0_path == app_path
-                                || canonical_app_path
-                                    .as_ref()
-                                    .map_or(false, |p| p.as_path() == argv0_path)
-                            {
-                                matched = true;
-                            } else if let Some(apprun) = apprun_path {
-                                if argv0_path == apprun
-                                    || canonical_apprun
-                                        .as_ref()
-                                        .map_or(false, |p| p.as_path() == argv0_path)
-                                {
-                                    matched = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if matched {
-                    pids.push(pid);
-                }
+            }
+            for p in [
+                Some(t.app_path.clone()),
+                std::fs::canonicalize(&t.app_path).ok(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let mut var = b"APPIMAGE=".to_vec();
+                var.extend_from_slice(p.as_os_str().as_encoded_bytes());
+                env_map.insert(var, &t.id);
             }
         }
 
-        pids.sort_unstable();
-        pids.dedup();
-        pids
+        let mut found: HashMap<String, Vec<ProcId>> = HashMap::new();
+        if targets.is_empty() {
+            return found;
+        }
+        let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+            return found;
+        };
+        let me = std::process::id();
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { libc::geteuid() };
+
+        for entry in proc_dir.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid == 0 || pid == me {
+                continue;
+            }
+            if entry.metadata().map(|m| m.uid() != uid).unwrap_or(true) {
+                continue;
+            }
+            let Some((state, start_time)) = Self::proc_stat(pid) else {
+                continue;
+            };
+            if state == 'Z' || state == 'X' {
+                continue;
+            }
+            let dir = entry.path();
+
+            let mut owner = std::fs::read_link(dir.join("exe"))
+                .ok()
+                .and_then(|exe| exe_map.get(&exe).copied());
+
+            if owner.is_none() {
+                if let Ok(cmdline) = std::fs::read(dir.join("cmdline")) {
+                    if let Some(argv0) = cmdline.split(|&b| b == 0).next() {
+                        let argv0 = Path::new(std::ffi::OsStr::from_bytes(argv0));
+                        owner = exe_map.get(argv0).copied();
+                    }
+                }
+            }
+            if owner.is_none() {
+                if let Ok(environ) = std::fs::read(dir.join("environ")) {
+                    owner = environ
+                        .split(|&b| b == 0)
+                        .find_map(|var| env_map.get(var).copied());
+                }
+            }
+
+            if let Some(id) = owner {
+                found
+                    .entry(id.to_string())
+                    .or_default()
+                    .push(ProcId { pid, start_time });
+            }
+        }
+        for ids in found.values_mut() {
+            ids.sort_by_key(|p| p.pid);
+        }
+        found
     }
 
     pub fn open_containing_folder(path: &Path) -> std::io::Result<()> {
@@ -207,14 +272,8 @@ impl ProcessLauncher {
         } else {
             path.parent().unwrap_or(path)
         };
-
-        Command::new("xdg-open")
-            .arg(folder)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-
-        Ok(())
+        let uri = gio::File::for_path(folder).uri();
+        gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>)
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }

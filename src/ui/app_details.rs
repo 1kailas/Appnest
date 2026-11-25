@@ -34,6 +34,12 @@ pub struct AppDetailsWidget {
     pub is_running: std::cell::Cell<bool>,
 }
 
+impl Default for AppDetailsWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppDetailsWidget {
     pub fn new() -> Self {
         let root_box = Box::builder()
@@ -216,7 +222,7 @@ impl AppDetailsWidget {
             "Auto (Adaptive)",
             "Extracted AppRun",
             "Direct Native",
-            "FUSE / Extract-and-run",
+            "Extract and run (no FUSE)",
         ]);
         let runtime_combo = ComboRow::builder()
             .title("Launch Method")
@@ -389,7 +395,13 @@ impl AppDetailsWidget {
         }
 
         // Update Details Rows
-        self.path_row.set_subtitle(&*app.path.to_string_lossy());
+        if app.exists() {
+            self.path_row.set_subtitle(&app.path.to_string_lossy());
+        } else {
+            self.path_row
+                .set_subtitle(&format!("{} (file missing)", app.path.to_string_lossy()));
+        }
+        self.launch_btn.set_sensitive(app.exists());
         self.size_row.set_subtitle(&app.formatted_size());
         self.date_row.set_subtitle(&app.formatted_date());
 
@@ -403,7 +415,7 @@ impl AppDetailsWidget {
         self.cmd_preview_row.set_subtitle(&app.command_preview());
 
         // Update Checksum
-        if let Some(ref hash) = app.sha256 {
+        if let Some(hash) = app.cached_sha256() {
             self.hash_row.set_subtitle(hash);
             self.copy_hash_btn.set_visible(true);
             self.compute_hash_btn
@@ -421,7 +433,7 @@ impl AppDetailsWidget {
             RuntimeMethod::Auto => 0,
             RuntimeMethod::Extracted => 1,
             RuntimeMethod::Native => 2,
-            RuntimeMethod::Fuse => 3,
+            RuntimeMethod::ExtractAndRun => 3,
         };
         self.runtime_combo.set_selected(idx);
 

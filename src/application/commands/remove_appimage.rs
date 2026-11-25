@@ -25,36 +25,39 @@ impl RemoveAppImageCommand {
         }
     }
 
+    /// Removes an application. The record is deleted first, so a failure leaves the files
+    /// untouched rather than leaving a record that points at deleted files. Only files inside
+    /// AppNest's own directories are ever deleted; a referenced (non-managed) AppImage is
+    /// never deleted.
     pub fn execute(&self, id: &str, delete_file: bool) -> Result<(), AppImageError> {
-        if let Some(app) = self.repository.get_by_id(id)? {
-            // Terminate running instance if any
-            let _ = self.launcher.terminate(&app);
+        let Some(app) = self.repository.get_by_id(id)? else {
+            return Ok(());
+        };
 
-            // Remove desktop integration
-            let _ = DesktopEntryService::remove_entry(&app, &self.paths.desktop_applications_dir);
-            DesktopEntryService::remove_user_desktop_shortcut(
-                &app,
-                self.paths.user_desktop_dir.as_deref(),
-            );
+        let _ = self.launcher.terminate(&app);
+        self.repository.remove(id)?;
 
-            // Remove extracted folder if exists
-            let extracted = self.paths.app_extracted_dir(&app.id);
+        let _ = DesktopEntryService::remove_entry(&app, &self.paths.desktop_applications_dir);
+        DesktopEntryService::remove_user_desktop_shortcut(
+            &app,
+            self.paths.user_desktop_dir.as_deref(),
+        );
+        let extracted = self.paths.app_extracted_dir(&app.id);
+        if FileSystem::is_inside(&self.paths.extracted_dir, &extracted) {
             let _ = FileSystem::remove_dir_all_if_exists(&extracted);
-
-            // Remove icon if exists
-            if let Some(ref icon) = app.icon_path {
-                let _ = FileSystem::remove_file_if_exists(icon);
-            }
-
-            // Remove binary if managed and requested
-            if delete_file && app.managed {
-                let _ = FileSystem::remove_file_if_exists(&app.path);
-            }
-
-            // Remove from database
-            self.repository.remove(id)?;
         }
 
+        if let Some(icon) = &app.icon_path {
+            if FileSystem::is_inside(&self.paths.icons_dir, icon) {
+                let _ = FileSystem::remove_file_if_exists(icon);
+            }
+        }
+        if delete_file
+            && app.managed
+            && FileSystem::is_inside(&self.paths.applications_dir, &app.path)
+        {
+            let _ = FileSystem::remove_file_if_exists(&app.path);
+        }
         Ok(())
     }
 }

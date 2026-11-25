@@ -64,9 +64,13 @@ impl AppRowWidget {
             .build();
         title_label.add_css_class("heading");
 
-        let subtitle = match &app.version {
-            Some(ver) => format!("v{} • {}", ver, app.formatted_size()),
-            None => app.formatted_size(),
+        let subtitle = if !app.exists() {
+            "File missing - remove this entry or restore the file".to_string()
+        } else {
+            match &app.version {
+                Some(ver) => format!("v{} • {}", ver, app.formatted_size()),
+                None => app.formatted_size(),
+            }
         };
         let subtitle_label = Label::builder()
             .label(&subtitle)
@@ -102,6 +106,7 @@ impl AppRowWidget {
             .build();
         launch_button.add_css_class("flat");
         launch_button.add_css_class("circular");
+        launch_button.set_sensitive(app.exists());
         trailing_box.append(&launch_button);
 
         main_box.append(&trailing_box);

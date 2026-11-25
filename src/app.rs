@@ -1,9 +1,9 @@
+use crate::application::commands::MigrateDesktopEntriesCommand;
 use crate::config::paths::AppPaths;
 use crate::config::settings::ThemePreference;
 use crate::domain::repository::AppImageRepository;
 use crate::infrastructure::config_store::ConfigStore;
 use crate::infrastructure::filesystem_repository::FilesystemAppImageRepository;
-use crate::services::desktop_entry::DesktopEntryService;
 use crate::ui::window::MainWindow;
 use gtk4::gdk::Display;
 use gtk4::gio::ApplicationFlags;
@@ -46,14 +46,16 @@ impl AppManagerApplication {
         app.set_accels_for_action("win.close", &["<Control>q", "<Control>w"]);
 
         let config_store_for_startup = Arc::clone(&config_store);
+        let repo_for_startup = Arc::clone(&repo);
+        let paths_for_startup = paths.clone();
         app.connect_startup(move |_| {
             let settings = config_store_for_startup.load();
             Self::apply_theme(settings.theme);
             Self::load_styles();
-            // Run MIME registration in background to avoid blocking startup
-            std::thread::spawn(|| {
-                DesktopEntryService::ensure_mime_integration();
-            });
+
+            let repo = Arc::clone(&repo_for_startup);
+            let paths = paths_for_startup.clone();
+            std::thread::spawn(move || MigrateDesktopEntriesCommand::new(repo, paths).execute());
         });
 
         let main_window_cell: Rc<RefCell<Option<Rc<MainWindow>>>> = Rc::new(RefCell::new(None));

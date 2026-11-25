@@ -6,17 +6,21 @@ on:
   pull_request:
     branches: [ "main", "master" ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build-and-test:
-    name: Build, Test & Validate
+    name: Build, Lint, Test & Validate
+    # Ubuntu 24.04 ships GTK 4.14 and libadwaita 1.5, the minimum AppNest needs
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install system dependencies
         run: |
@@ -26,27 +30,65 @@ jobs:
             libadwaita-1-dev \
             desktop-file-utils \
             appstream \
-            p7zip-full
+            p7zip-full \
+            squashfs-tools
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Verify Code Formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: Lint (warnings are errors)
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run Unit & Integration Tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
       - name: Build Release Binary
-        run: cargo build --release --verbose
+        run: cargo build --release --locked --verbose
 
       - name: Validate Desktop Entry
         run: desktop-file-validate packaging/io.github._1kailas.AppNest.desktop
 
       - name: Validate AppStream Metainfo
         run: appstreamcli validate --no-net resources/io.github._1kailas.AppNest.metainfo.xml
+
+  fedora-rpm:
+    name: Fedora RPM build (offline, system crates)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    # Fedora's packaged Rust crates are occasionally broken for a while; keep the signal
+    # visible without blocking unrelated changes.
+    continue-on-error: true
+
+    steps:
+      - name: Install build tools
+        run: |
+          dnf install -y git tar rpm-build rpmdevtools rpmlint cargo-rpm-macros \
+            desktop-file-utils libappstream-glib gtk4-devel libadwaita-devel 7zip squashfs-tools
+
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build RPM from the checked-out sources
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          VERSION=$(awk '/^Version:/ {print $2; exit}' packaging/rpm/appnest.spec)
+          rpmdev-setuptree
+          git archive --format=tar.gz --prefix="Appnest-${VERSION}/" \
+            -o "${HOME}/rpmbuild/SOURCES/appnest-${VERSION}.tar.gz" HEAD
+          cp packaging/rpm/appnest.spec "${HOME}/rpmbuild/SPECS/"
+          cd "${HOME}/rpmbuild/SPECS"
+          rpmbuild -br appnest.spec || true
+          dnf -y builddep "${HOME}"/rpmbuild/SRPMS/appnest-*.buildreqs.nosrc.rpm
+          rpmbuild -ba appnest.spec
+
+      - name: rpmlint
+        run: rpmlint "${HOME}"/rpmbuild/SPECS/appnest.spec "${HOME}"/rpmbuild/SRPMS/appnest-*.src.rpm "${HOME}"/rpmbuild/RPMS/*/appnest-[0-9]*.rpm

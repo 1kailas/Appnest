@@ -7,6 +7,7 @@ use crate::config::paths::AppPaths;
 use crate::domain::appimage::{AppImage, RuntimeMethod};
 use crate::domain::repository::AppImageRepository;
 use crate::infrastructure::config_store::ConfigStore;
+use crate::infrastructure::hash::sha256_file;
 use crate::infrastructure::process::ProcessLauncher;
 use crate::services::desktop_entry::DesktopEntryService;
 use crate::services::extractor::AppImageExtractor;
@@ -30,10 +31,10 @@ use libadwaita::{
     ToastOverlay, WindowTitle,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 struct ControllerState {
     apps: Vec<AppImage>,
@@ -41,12 +42,28 @@ struct ControllerState {
     unmanaged: Vec<PathBuf>,
     selected_id: Option<String>,
     row_widgets: HashMap<String, Rc<AppRowWidget>>,
+    running: HashSet<String>,
+}
+
+type RefreshHandle = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
+struct Snapshot {
+    listing: AppImagesListing,
+    running: HashSet<String>,
+}
+
+fn subtitle_text(total: usize, running: usize) -> String {
+    let plural = if total == 1 { "" } else { "s" };
+    match (total, running) {
+        (0, _) => "No Applications".to_string(),
+        (_, 0) => format!("{} Application{}", total, plural),
+        _ => format!("{} Application{} • {} Running", total, plural, running),
+    }
 }
 
 pub struct MainWindow {
     pub window: ApplicationWindow,
     prompt_open_fn: Rc<dyn Fn(PathBuf)>,
-    prompt_import_fn: Rc<dyn Fn(PathBuf)>,
 }
 
 impl MainWindow {
@@ -54,9 +71,6 @@ impl MainWindow {
         (self.prompt_open_fn)(path);
     }
 
-    pub fn prompt_import_file(&self, path: PathBuf) {
-        (self.prompt_import_fn)(path);
-    }
     pub fn new(
         app: &Application,
         paths: AppPaths,
@@ -89,6 +103,7 @@ impl MainWindow {
             unmanaged: Vec::new(),
             selected_id: None,
             row_widgets: HashMap::new(),
+            running: HashSet::new(),
         }));
 
         // Prevents signal handler loops when programmatically updating widgets
@@ -223,55 +238,89 @@ impl MainWindow {
         });
         window.add_action(&about_action);
 
-        // Function to refresh apps list
-        let refresh_list_fn = {
+        // Starts or stops an application on a worker thread (both can take a moment) and
+        // reflects the result in the list and details views.
+        let toggle_app_fn: Rc<dyn Fn(String, String)> = {
             let state = Rc::clone(&state);
-            let list_query = Arc::clone(&list_query);
-            let config_store = Arc::clone(&config_store);
+            let launch_cmd = Arc::clone(&launch_cmd);
+            let close_cmd = Arc::clone(&close_cmd);
+            let toast_overlay = toast_overlay.clone();
+            let app_details_widget = Rc::clone(&app_details_widget);
+            let busy: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
+
+            Rc::new(move |app_id: String, app_name: String| {
+                if !busy.borrow_mut().insert(app_id.clone()) {
+                    return;
+                }
+                let closing = state.borrow().running.contains(&app_id);
+
+                let (tx, rx) = async_channel::bounded(1);
+                {
+                    let launch_cmd = Arc::clone(&launch_cmd);
+                    let close_cmd = Arc::clone(&close_cmd);
+                    let id = app_id.clone();
+                    std::thread::spawn(move || {
+                        let res = if closing {
+                            close_cmd.execute(&id).map(|_| 0)
+                        } else {
+                            launch_cmd.execute(&id, &[])
+                        };
+                        let _ = tx.send_blocking(res);
+                    });
+                }
+
+                let state = Rc::clone(&state);
+                let toast_overlay = toast_overlay.clone();
+                let details = Rc::clone(&app_details_widget);
+                let busy = Rc::clone(&busy);
+                glib::spawn_future_local(async move {
+                    let Ok(res) = rx.recv().await else { return };
+                    busy.borrow_mut().remove(&app_id);
+
+                    let set_running = |running: bool| {
+                        let mut st = state.borrow_mut();
+                        if running {
+                            st.running.insert(app_id.clone());
+                        } else {
+                            st.running.remove(&app_id);
+                        }
+                        if let Some(row) = st.row_widgets.get(&app_id) {
+                            row.set_running_state(running);
+                        }
+                        if st.selected_id.as_deref() == Some(app_id.as_str()) {
+                            details.borrow().set_running_state(running);
+                        }
+                    };
+
+                    let message = match (closing, res) {
+                        (true, Ok(_)) => {
+                            set_running(false);
+                            format!("Closed {}", app_name)
+                        }
+                        (true, Err(e)) => format!("Failed to close {}: {}", app_name, e),
+                        (false, Ok(_)) => {
+                            set_running(true);
+                            format!("Launched {}", app_name)
+                        }
+                        (false, Err(e)) => format!("Failed to launch {}: {}", app_name, e),
+                    };
+                    toast_overlay.add_toast(Toast::new(&message));
+                });
+            })
+        };
+
+        // Rebuilds the list and details from a snapshot gathered on a worker thread
+        let render_fn: Rc<dyn Fn(Snapshot)> = {
+            let state = Rc::clone(&state);
             let app_list_widget = Rc::clone(&app_list_widget);
             let app_details_widget = Rc::clone(&app_details_widget);
             let right_stack = right_stack.clone();
-            let toast_overlay = toast_overlay.clone();
-            let launch_cmd = Arc::clone(&launch_cmd);
-            let close_cmd = Arc::clone(&close_cmd);
             let is_updating = Rc::clone(&is_updating);
-            let paths_for_refresh = paths.clone();
-            let repo_for_refresh = Arc::clone(&repo);
             let title_widget_clone = title_widget.clone();
+            let toggle_app_fn = Rc::clone(&toggle_app_fn);
 
-            Rc::new(move || {
-                let settings = config_store.load();
-                let scan_dirs = if settings.scan_directories.is_empty() {
-                    paths_for_refresh.default_scan_directories()
-                } else {
-                    settings.scan_directories.clone()
-                };
-
-                let mut listing = list_query.execute(&scan_dirs).unwrap_or(AppImagesListing {
-                    managed: Vec::new(),
-                    unmanaged_discovered: Vec::new(),
-                });
-
-                // Auto-extract missing icons for managed applications
-                for app in &mut listing.managed {
-                    if app.icon_path.as_ref().map_or(true, |p| !p.exists()) {
-                        if let Some(extracted_icon) = AppImageExtractor::extract_icon_only(
-                            &app.path,
-                            &paths_for_refresh.icons_dir,
-                            &app.id,
-                            app.metadata.icon_name.as_deref(),
-                        ) {
-                            app.icon_path = Some(extracted_icon);
-                            let _ = repo_for_refresh.save(app);
-                            if app.desktop_integrated {
-                                let _ = DesktopEntryService::create_entry(
-                                    app,
-                                    &paths_for_refresh.desktop_applications_dir,
-                                );
-                            }
-                        }
-                    }
-                }
+            Rc::new(move |snapshot: Snapshot| {
+                let Snapshot { listing, running } = snapshot;
 
                 let query = app_list_widget
                     .borrow()
@@ -296,6 +345,7 @@ impl MainWindow {
                     st.apps = listing.managed.clone();
                     st.filtered_apps = filtered_apps.clone();
                     st.unmanaged = listing.unmanaged_discovered.clone();
+                    st.running = running.clone();
                 }
 
                 // Clear installed listbox safely
@@ -307,106 +357,35 @@ impl MainWindow {
                 let mut row_map = HashMap::new();
                 for app in &filtered_apps {
                     let row_widget = Rc::new(AppRowWidget::new(app));
-                    let app_id = app.id.clone();
-                    let app_name = app.name.clone();
+                    row_widget.set_running_state(running.contains(&app.id));
 
-                    row_widget.set_running_state(close_cmd.is_running(&app_id));
-
-                    // Connect quick launch / close button
-                    let launch_cmd_clone = Arc::clone(&launch_cmd);
-                    let close_cmd_clone = Arc::clone(&close_cmd);
-                    let toast_overlay_clone = toast_overlay.clone();
-                    let row_widget_clone = Rc::clone(&row_widget);
-                    let app_details_widget_clone = Rc::clone(&app_details_widget);
-                    let state_clone = Rc::clone(&state);
-                    let app_id_c = app_id.clone();
-                    let app_name_c = app_name.clone();
+                    let toggle = Rc::clone(&toggle_app_fn);
+                    let (app_id, app_name) = (app.id.clone(), app.name.clone());
                     let listbox_weak = listbox.downgrade();
                     let row_weak = row_widget.row.downgrade();
-
                     row_widget.launch_button.connect_clicked(move |_| {
                         if let (Some(lb), Some(rw)) = (listbox_weak.upgrade(), row_weak.upgrade()) {
                             lb.select_row(Some(&rw));
                         }
-                        let is_closing = row_widget_clone.is_running.get();
-                        if is_closing {
-                            match close_cmd_clone.execute(&app_id_c) {
-                                Ok(_) => {
-                                    toast_overlay_clone
-                                        .add_toast(Toast::new(&format!("Closed {}", app_name_c)));
-                                }
-                                Err(_) => {
-                                    toast_overlay_clone
-                                        .add_toast(Toast::new(&format!("Closed {}", app_name_c)));
-                                }
-                            }
-                            row_widget_clone.set_running_state(false);
-                            if state_clone.borrow().selected_id.as_deref() == Some(&app_id_c) {
-                                app_details_widget_clone.borrow().set_running_state(false);
-                            }
-                        } else {
-                            match launch_cmd_clone.execute(&app_id_c, &[]) {
-                                Ok(pid) => {
-                                    toast_overlay_clone.add_toast(Toast::new(&format!(
-                                        "Launched {} (PID: {})",
-                                        app_name_c, pid
-                                    )));
-                                    row_widget_clone.set_running_state(true);
-                                    if state_clone.borrow().selected_id.as_deref()
-                                        == Some(&app_id_c)
-                                    {
-                                        app_details_widget_clone.borrow().set_running_state(true);
-                                    }
-                                }
-                                Err(e) => {
-                                    toast_overlay_clone.add_toast(Toast::new(&format!(
-                                        "Failed to launch {}: {}",
-                                        app_name_c, e
-                                    )));
-                                }
-                            }
-                        }
+                        toggle(app_id.clone(), app_name.clone());
                     });
 
-                    row_map.insert(app_id, Rc::clone(&row_widget));
+                    row_map.insert(app.id.clone(), Rc::clone(&row_widget));
                     listbox.append(&row_widget.row);
                 }
-
                 state.borrow_mut().row_widgets = row_map;
 
-                // Update empty state
-                let has_apps = !filtered_apps.is_empty();
-                let is_searching = !query.is_empty();
                 app_list_widget
                     .borrow()
-                    .set_empty_state(has_apps, is_searching);
+                    .set_empty_state(!filtered_apps.is_empty(), !query.is_empty());
 
-                // Update HeaderBar WindowTitle subtitle
-                let total_apps = filtered_apps.len();
                 let running_count = filtered_apps
                     .iter()
-                    .filter(|a| close_cmd.is_running(&a.id))
+                    .filter(|a| running.contains(&a.id))
                     .count();
+                title_widget_clone.set_subtitle(&subtitle_text(filtered_apps.len(), running_count));
 
-                let subtitle = if total_apps == 0 {
-                    "No Applications".to_string()
-                } else if running_count > 0 {
-                    format!(
-                        "{} Application{} • {} Running",
-                        total_apps,
-                        if total_apps == 1 { "" } else { "s" },
-                        running_count
-                    )
-                } else {
-                    format!(
-                        "{} Application{}",
-                        total_apps,
-                        if total_apps == 1 { "" } else { "s" }
-                    )
-                };
-                title_widget_clone.set_subtitle(&subtitle);
-
-                // If currently selected app is still present, re-select
+                // If the selected app is still present, show it again
                 let found_app = {
                     let st = state.borrow();
                     st.selected_id
@@ -419,11 +398,10 @@ impl MainWindow {
                     app_details_widget.borrow_mut().update(found);
                     app_details_widget
                         .borrow()
-                        .set_running_state(close_cmd.is_running(&found.id));
+                        .set_running_state(running.contains(&found.id));
                     is_updating.set(false);
                     right_stack.set_visible_child_name("details");
 
-                    // Visually highlight row in listbox
                     if let Some(pos) = filtered_apps.iter().position(|a| a.id == found.id) {
                         if let Some(row) = listbox.row_at_index(pos as i32) {
                             listbox.select_row(Some(&row));
@@ -434,6 +412,105 @@ impl MainWindow {
                 }
             })
         };
+
+        // Gathers the library listing, scans for running applications and extracts missing
+        // icons on one worker thread. Requests made while a refresh is running are merged
+        // into a single follow-up refresh.
+        let refresh_self: RefreshHandle = Rc::new(RefCell::new(None));
+        let refresh_list_fn: Rc<dyn Fn()> = {
+            let list_query = Arc::clone(&list_query);
+            let launcher = Arc::clone(&launcher);
+            let repo = Arc::clone(&repo);
+            let paths = paths.clone();
+            let render_fn = Rc::clone(&render_fn);
+            let refresh_self = Rc::clone(&refresh_self);
+            let in_flight = Rc::new(Cell::new(false));
+            let pending = Rc::new(Cell::new(false));
+            let icon_attempted: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+            Rc::new(move || {
+                if in_flight.replace(true) {
+                    pending.set(true);
+                    return;
+                }
+
+                let (tx, rx) = async_channel::unbounded::<Snapshot>();
+                {
+                    let list_query = Arc::clone(&list_query);
+                    let launcher = Arc::clone(&launcher);
+                    let repo = Arc::clone(&repo);
+                    let paths = paths.clone();
+                    let attempted = Arc::clone(&icon_attempted);
+
+                    std::thread::spawn(move || {
+                        // Discovery of unmanaged AppImages is not shown in the UI, so the
+                        // refresh does not scan the disk for them.
+                        let listing = list_query.execute(&[]).unwrap_or(AppImagesListing {
+                            managed: Vec::new(),
+                            unmanaged_discovered: Vec::new(),
+                        });
+                        let running = launcher.refresh_running(&listing.managed);
+                        let managed = listing.managed.clone();
+                        let _ = tx.send_blocking(Snapshot {
+                            listing,
+                            running: running.clone(),
+                        });
+
+                        // Missing icons are extracted once per session, after the list is shown
+                        let mut changed = false;
+                        for mut app in managed {
+                            let missing = app.icon_path.as_ref().is_none_or(|p| !p.exists());
+                            let first_try = attempted
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(app.id.clone());
+                            if !(missing && first_try && app.exists()) {
+                                continue;
+                            }
+                            if let Some(icon) = AppImageExtractor::extract_icon_only(
+                                &app.path,
+                                &paths.icons_dir,
+                                &app.id,
+                                app.metadata.icon_name.as_deref(),
+                            ) {
+                                app.icon_path = Some(icon);
+                                let _ = repo.save(&app);
+                                if app.desktop_integrated {
+                                    let _ = DesktopEntryService::create_entry(
+                                        &app,
+                                        &paths.desktop_applications_dir,
+                                    );
+                                }
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            if let Ok(listing) = list_query.execute(&[]) {
+                                let _ = tx.send_blocking(Snapshot { listing, running });
+                            }
+                        }
+                    });
+                }
+
+                let render_fn = Rc::clone(&render_fn);
+                let in_flight = Rc::clone(&in_flight);
+                let pending = Rc::clone(&pending);
+                let refresh_self = Rc::clone(&refresh_self);
+                glib::spawn_future_local(async move {
+                    while let Ok(snapshot) = rx.recv().await {
+                        render_fn(snapshot);
+                    }
+                    in_flight.set(false);
+                    if pending.replace(false) {
+                        let again = refresh_self.borrow().clone();
+                        if let Some(f) = again {
+                            f();
+                        }
+                    }
+                });
+            })
+        };
+        *refresh_self.borrow_mut() = Some(Rc::clone(&refresh_list_fn));
 
         // Connect Refresh Button
         let r_fn = Rc::clone(&refresh_list_fn);
@@ -456,45 +533,25 @@ impl MainWindow {
             let app_details_widget = Rc::clone(&app_details_widget);
             let right_stack = right_stack.clone();
             let is_updating = Rc::clone(&is_updating);
-            let paths_for_select = paths.clone();
-            let repo_for_select = Arc::clone(&repo);
-            let close_cmd = Arc::clone(&close_cmd);
 
             app_list_widget
                 .borrow()
                 .installed_list
                 .connect_row_selected(move |_, row_opt| {
-                    if let Some(row) = row_opt {
-                        let idx = row.index() as usize;
-                        let app_opt = {
-                            let st = state.borrow();
-                            st.filtered_apps.get(idx).cloned()
-                        };
-                        if let Some(mut app) = app_opt {
-                            // Ensure icon is extracted and available
-                            if app.icon_path.as_ref().map_or(true, |p| !p.exists()) {
-                                if let Some(extracted) = AppImageExtractor::extract_icon_only(
-                                    &app.path,
-                                    &paths_for_select.icons_dir,
-                                    &app.id,
-                                    app.metadata.icon_name.as_deref(),
-                                ) {
-                                    app.icon_path = Some(extracted);
-                                    let _ = repo_for_select.save(&app);
-                                }
-                            }
-
-                            {
-                                state.borrow_mut().selected_id = Some(app.id.clone());
-                            }
-                            is_updating.set(true);
-                            app_details_widget.borrow_mut().update(&app);
-                            app_details_widget
-                                .borrow()
-                                .set_running_state(close_cmd.is_running(&app.id));
-                            is_updating.set(false);
-                            right_stack.set_visible_child_name("details");
-                        }
+                    let Some(row) = row_opt else { return };
+                    let (app_opt, running) = {
+                        let st = state.borrow();
+                        let app = st.filtered_apps.get(row.index() as usize).cloned();
+                        let running = app.as_ref().is_some_and(|a| st.running.contains(&a.id));
+                        (app, running)
+                    };
+                    if let Some(app) = app_opt {
+                        state.borrow_mut().selected_id = Some(app.id.clone());
+                        is_updating.set(true);
+                        app_details_widget.borrow_mut().update(&app);
+                        app_details_widget.borrow().set_running_state(running);
+                        is_updating.set(false);
+                        right_stack.set_visible_child_name("details");
                     }
                 });
         }
@@ -502,10 +559,7 @@ impl MainWindow {
         // Connect Details: Launch / Close Button
         {
             let state = Rc::clone(&state);
-            let launch_cmd = Arc::clone(&launch_cmd);
-            let close_cmd = Arc::clone(&close_cmd);
-            let toast_overlay = toast_overlay.clone();
-            let app_details_widget = Rc::clone(&app_details_widget);
+            let toggle = Rc::clone(&toggle_app_fn);
             let launch_btn = app_details_widget.borrow().launch_btn.clone();
 
             launch_btn.connect_clicked(move |_| {
@@ -518,97 +572,59 @@ impl MainWindow {
                             .map(|a| (id.clone(), a.name.clone()))
                     })
                 };
-
                 if let Some((app_id, app_name)) = selected {
-                    let is_closing = app_details_widget.borrow().is_running.get();
-                    if is_closing {
-                        match close_cmd.execute(&app_id) {
-                            Ok(_) => {
-                                toast_overlay
-                                    .add_toast(Toast::new(&format!("Closed {}", app_name)));
-                            }
-                            Err(_) => {
-                                toast_overlay
-                                    .add_toast(Toast::new(&format!("Closed {}", app_name)));
-                            }
-                        }
-                        app_details_widget.borrow().set_running_state(false);
-                        let st = state.borrow();
-                        if let Some(row_widget) = st.row_widgets.get(&app_id) {
-                            row_widget.set_running_state(false);
-                        }
-                    } else {
-                        match launch_cmd.execute(&app_id, &[]) {
-                            Ok(pid) => {
-                                toast_overlay.add_toast(Toast::new(&format!(
-                                    "Launched {} (PID: {})",
-                                    app_name, pid
-                                )));
-                                app_details_widget.borrow().set_running_state(true);
-                                let st = state.borrow();
-                                if let Some(row_widget) = st.row_widgets.get(&app_id) {
-                                    row_widget.set_running_state(true);
-                                }
-                            }
-                            Err(e) => {
-                                toast_overlay.add_toast(Toast::new(&format!(
-                                    "Launch error for {}: {}",
-                                    app_name, e
-                                )));
-                            }
-                        }
-                    }
+                    toggle(app_id, app_name);
                 }
             });
         }
 
-        // Periodic running status watcher (syncs button states every second)
+        // Periodically sync running state; /proc is scanned on a worker thread
         {
             let state = Rc::clone(&state);
-            let close_cmd = Arc::clone(&close_cmd);
+            let launcher = Arc::clone(&launcher);
             let app_details_widget = Rc::clone(&app_details_widget);
             let title_widget_watcher = title_widget.clone();
+            let scanning = Rc::new(Cell::new(false));
 
             glib::timeout_add_local(std::time::Duration::from_millis(2000), move || {
-                let (selected_id, row_widgets) = {
-                    let st = state.borrow();
-                    (st.selected_id.clone(), st.row_widgets.clone())
-                };
-
-                let mut checked_status: HashMap<String, bool> = HashMap::new();
-
-                for (id, row_widget) in &row_widgets {
-                    let running = close_cmd.is_running(id);
-                    checked_status.insert(id.clone(), running);
-                    row_widget.set_running_state(running);
+                if scanning.get() {
+                    return glib::ControlFlow::Continue;
                 }
-
-                if let Some(ref id) = selected_id {
-                    let running = checked_status
-                        .get(id)
-                        .copied()
-                        .unwrap_or_else(|| close_cmd.is_running(id));
-                    app_details_widget.borrow().set_running_state(running);
+                let apps = state.borrow().apps.clone();
+                if apps.is_empty() {
+                    return glib::ControlFlow::Continue;
                 }
+                scanning.set(true);
 
-                let running_count = row_widgets
-                    .keys()
-                    .filter(|id| checked_status.get(*id).copied().unwrap_or(false))
-                    .count();
-                let total = row_widgets.len();
-                let subtitle = if total == 0 {
-                    "No Applications".to_string()
-                } else if running_count > 0 {
-                    format!(
-                        "{} Application{} • {} Running",
-                        total,
-                        if total == 1 { "" } else { "s" },
-                        running_count
-                    )
-                } else {
-                    format!("{} Application{}", total, if total == 1 { "" } else { "s" })
-                };
-                title_widget_watcher.set_subtitle(&subtitle);
+                let (tx, rx) = async_channel::bounded(1);
+                let launcher = Arc::clone(&launcher);
+                std::thread::spawn(move || {
+                    let _ = tx.send_blocking(launcher.refresh_running(&apps));
+                });
+
+                let state = Rc::clone(&state);
+                let details = Rc::clone(&app_details_widget);
+                let title = title_widget_watcher.clone();
+                let scanning = Rc::clone(&scanning);
+                glib::spawn_future_local(async move {
+                    if let Ok(running) = rx.recv().await {
+                        let mut st = state.borrow_mut();
+                        for (id, row) in &st.row_widgets {
+                            row.set_running_state(running.contains(id));
+                        }
+                        if let Some(id) = &st.selected_id {
+                            details.borrow().set_running_state(running.contains(id));
+                        }
+                        let running_count = st
+                            .row_widgets
+                            .keys()
+                            .filter(|id| running.contains(*id))
+                            .count();
+                        title.set_subtitle(&subtitle_text(st.row_widgets.len(), running_count));
+                        st.running = running;
+                    }
+                    scanning.set(false);
+                });
 
                 glib::ControlFlow::Continue
             });
@@ -711,7 +727,7 @@ impl MainWindow {
                                             st.apps
                                                 .iter()
                                                 .find(|a| a.id == id)
-                                                .map_or(false, |a| a.is_extracted())
+                                                .is_some_and(|a| a.is_extracted())
                                         };
                                         btn_clone.set_label(if is_ext {
                                             "Re-extract AppDir"
@@ -759,7 +775,7 @@ impl MainWindow {
 
                     let (tx, rx) = async_channel::bounded(1);
                     std::thread::spawn(move || {
-                        let hash_opt = app_clone.calculate_sha256();
+                        let hash_opt = sha256_file(&app_clone.path).ok();
                         let _ = tx.send_blocking(hash_opt);
                     });
 
@@ -772,7 +788,7 @@ impl MainWindow {
                                     if let Some(stored) =
                                         st.apps.iter_mut().find(|a| a.id == target_id)
                                     {
-                                        stored.sha256 = Some(hash.clone());
+                                        stored.set_sha256(hash.clone());
                                         let _ = repo_c.save(stored);
                                     }
                                 }
@@ -820,7 +836,7 @@ impl MainWindow {
                             st.apps
                                 .iter()
                                 .find(|a| &a.id == id)
-                                .and_then(|a| a.sha256.clone())
+                                .and_then(|a| a.cached_sha256().map(str::to_string))
                         })
                     };
 
@@ -889,7 +905,7 @@ impl MainWindow {
                             0 => RuntimeMethod::Auto,
                             1 => RuntimeMethod::Extracted,
                             2 => RuntimeMethod::Native,
-                            3 => RuntimeMethod::Fuse,
+                            3 => RuntimeMethod::ExtractAndRun,
                             _ => RuntimeMethod::Auto,
                         };
                         if let Ok(updated) = update_cmd.set_runtime_method(&id, method) {
@@ -921,7 +937,7 @@ impl MainWindow {
 
                 if let Some((app_id, app_name)) = selected {
                     let dialog = AlertDialog::builder()
-                        .heading(&format!("Uninstall {}?", app_name))
+                        .heading(format!("Uninstall {}?", app_name))
                         .body("This will remove the application, its desktop shortcuts, and extracted files.")
                         .build();
 
@@ -981,13 +997,11 @@ impl MainWindow {
                     return;
                 }
 
-                let is_appimage_ext = path
-                    .extension()
-                    .map_or(false, |ext| ext.eq_ignore_ascii_case("appimage"));
-                if !is_appimage_ext && AppImageValidator::validate(&path).is_err() {
+                if let Err(e) = AppImageValidator::validate(&path) {
                     toast_overlay.add_toast(Toast::new(&format!(
-                        "Invalid AppImage: {}",
-                        path.file_name().unwrap_or_default().to_string_lossy()
+                        "Cannot use {}: {}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        e
                     )));
                     return;
                 }
@@ -1004,9 +1018,8 @@ impl MainWindow {
 
                 // If already in AppNest, just select it and present the window — no dialog, no launch
                 if let Some(existing_app) = existing {
-                    let has_desktop_shortcut = paths.user_desktop_dir.as_ref().map_or(false, |d| {
-                        d.join(format!("{}.desktop", existing_app.name)).exists()
-                            || d.join(format!("{}.desktop", existing_app.id)).exists()
+                    let has_desktop_shortcut = paths.user_desktop_dir.as_ref().is_some_and(|d| {
+                        DesktopEntryService::entry_path(&existing_app, d).is_ok_and(|p| p.exists())
                     });
 
                     if !has_desktop_shortcut || !existing_app.desktop_integrated {
@@ -1019,8 +1032,8 @@ impl MainWindow {
                         let state_dlg = Rc::clone(&state);
 
                         let dialog = AlertDialog::builder()
-                            .heading(&format!("Create Shortcut for {}?", existing_app.name))
-                            .body(&format!(
+                            .heading(format!("Create Shortcut for {}?", existing_app.name))
+                            .body(format!(
                                 "\"{}\" is already in AppNest but doesn't have a desktop shortcut.",
                                 existing_app.name
                             ))
@@ -1079,8 +1092,8 @@ impl MainWindow {
                     .unwrap_or_else(|| "AppImage".to_string());
 
                 let dialog = AlertDialog::builder()
-                    .heading(&format!("Add {} to AppNest?", app_name))
-                    .body(&format!(
+                    .heading(format!("Add {} to AppNest?", app_name))
+                    .body(format!(
                         "Would you like to add \"{}\" to AppNest and create a desktop shortcut?",
                         app_name
                     ))
@@ -1191,22 +1204,27 @@ impl MainWindow {
                                 .file_stem()
                                 .map(|s| s.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "AppImage".to_string());
-                            let app_id = AppImage::sanitize_id(&name);
-                            let mut temp_app = AppImage::new(&app_id, &name, path_dlg);
-                            match launcher_dlg.launch(&mut temp_app, &[]) {
-                                Ok(pid) => {
-                                    toast_dlg.add_toast(Toast::new(&format!(
-                                        "Running {} once (PID: {})",
-                                        name, pid
-                                    )));
+                            let app_id = format!("run-once-{}", AppImage::sanitize_id(&name));
+                            let launcher = Arc::clone(&launcher_dlg);
+                            let path_run = path_dlg.clone();
+                            let name_run = name.clone();
+
+                            let (tx, rx) = async_channel::bounded(1);
+                            std::thread::spawn(move || {
+                                let mut temp_app = AppImage::new(&app_id, &name_run, path_run);
+                                let _ = tx.send_blocking(launcher.launch(&mut temp_app, &[]));
+                            });
+
+                            let toast = toast_dlg.clone();
+                            glib::spawn_future_local(async move {
+                                if let Ok(res) = rx.recv().await {
+                                    let message = match res {
+                                        Ok(_) => format!("Running {} once", name),
+                                        Err(e) => format!("Failed to run {}: {}", name, e),
+                                    };
+                                    toast.add_toast(Toast::new(&message));
                                 }
-                                Err(e) => {
-                                    toast_dlg.add_toast(Toast::new(&format!(
-                                        "Failed to run {}: {}",
-                                        name, e
-                                    )));
-                                }
-                            }
+                            });
                         }
                         _ => {}
                     }
@@ -1231,13 +1249,11 @@ impl MainWindow {
                     return;
                 }
 
-                let is_appimage_ext = path
-                    .extension()
-                    .map_or(false, |ext| ext.eq_ignore_ascii_case("appimage"));
-                if !is_appimage_ext && AppImageValidator::validate(&path).is_err() {
+                if let Err(e) = AppImageValidator::validate(&path) {
                     toast_overlay.add_toast(Toast::new(&format!(
-                        "Invalid AppImage: {}",
-                        path.file_name().unwrap_or_default().to_string_lossy()
+                        "Cannot use {}: {}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        e
                     )));
                     return;
                 }
@@ -1265,8 +1281,8 @@ impl MainWindow {
                     .unwrap_or_else(|| "AppImage".to_string());
 
                 let dialog = AlertDialog::builder()
-                    .heading(&format!("Add {} to AppNest?", app_name))
-                    .body(&format!(
+                    .heading(format!("Add {} to AppNest?", app_name))
+                    .body(format!(
                         "Would you like to add \"{}\" to AppNest and create a desktop shortcut?",
                         app_name
                     ))
@@ -1384,7 +1400,7 @@ impl MainWindow {
             Rc::new(move |paths_to_add: Vec<PathBuf>| {
                 let count = paths_to_add.len();
                 let dialog = AlertDialog::builder()
-                    .heading(&format!("Add {} Applications to AppNest?", count))
+                    .heading(format!("Add {} Applications to AppNest?", count))
                     .body("Would you like to add these applications to AppNest and create desktop shortcuts?")
                     .build();
 
@@ -1578,6 +1594,7 @@ impl MainWindow {
         {
             let prompt_import_drop = Rc::clone(&prompt_import_fn);
             let prompt_import_mult_drop = Rc::clone(&prompt_import_multiple_fn);
+            let toast_drop = toast_overlay.clone();
 
             let drop_target = DropTarget::new(glib::types::Type::INVALID, gdk::DragAction::COPY);
             drop_target.set_types(&[gdk::FileList::static_type(), gio::File::static_type()]);
@@ -1596,13 +1613,24 @@ impl MainWindow {
                     }
                 }
 
-                paths.retain(|p| {
-                    p.is_file()
-                        && (p
-                            .extension()
-                            .map_or(false, |ext| ext.eq_ignore_ascii_case("appimage"))
-                            || AppImageValidator::validate(p).is_ok())
+                let mut rejected = Vec::new();
+                paths.retain(|p| match AppImageValidator::validate(p) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        rejected.push(format!(
+                            "{}: {}",
+                            p.file_name().unwrap_or_default().to_string_lossy(),
+                            e
+                        ));
+                        false
+                    }
                 });
+                if !rejected.is_empty() {
+                    toast_drop.add_toast(Toast::new(&format!(
+                        "Skipped invalid files: {}",
+                        rejected.join("; ")
+                    )));
+                }
 
                 if paths.is_empty() {
                     return false;
@@ -1626,7 +1654,6 @@ impl MainWindow {
         Self {
             window,
             prompt_open_fn,
-            prompt_import_fn,
         }
     }
 }

@@ -16,9 +16,9 @@ scratch/
 .system_generated/
 
 # Packaging build artifacts
+/vendor/
 *.rpm
 *.deb
 *.tar.gz
-!vendor/**
 rpmbuild/
 dist/

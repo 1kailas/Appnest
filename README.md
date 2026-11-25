@@ -1,148 +1,138 @@
-# 🪺 AppNest
+# AppNest
 
-A clean, modern Linux desktop application for managing, organizing, integrating, and launching AppImages. Built in **Rust** with **GTK4** and **Libadwaita** following **Clean Architecture**.
+A native Linux desktop application for managing, integrating and launching AppImages. Written in Rust with GTK4 and Libadwaita.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-orange.svg)]()
-[![Desktop: GNOME / Libadwaita](https://img.shields.io/badge/UI-GTK4%20%2F%20Libadwaita-brightgreen.svg)]()
 
----
+## Features
 
-## 🏗️ Architecture & Philosophy
+* **Import** AppImages with the file picker, by drag and drop (several at once), or by opening them from a file manager. Files are either copied into AppNest's library or referenced where they are.
+* **Validation**: every file is checked before use (ELF header, supported architecture, AppImage signature and embedded filesystem). A file is never accepted just because of its name.
+* **Desktop integration**: a menu entry (`appnest-<id>.desktop`) and, if a desktop folder exists, a desktop shortcut, with the icon extracted from the AppImage.
+* **Launch, close and Run Once** from the window. Running applications are detected, including ones started outside AppNest.
+* **Adaptive launching**: see [Launch methods](#launch-methods).
+* **SHA-256**: compute and copy the checksum of an AppImage. The stored value is discarded automatically when the file changes.
+* Search, light/dark/system theme and keyboard shortcuts (`Ctrl+O` add, `Ctrl+R`/`F5` refresh, `Ctrl+F` search, `Ctrl+,` preferences, `Ctrl+Q`/`Ctrl+W` close).
 
-The application strictly separates user interface code from domain and filesystem logic:
+### Launch methods
 
-```text
-                    ┌─────────────────────────┐
-                    │  GTK4 / Libadwaita UI   │
-                    │  (Views & Controllers)  │
-                    └────────────┬────────────┘
-                                 │
-                                 ▼
-                    ┌─────────────────────────┐
-                    │    Application Layer    │
-                    │  (Commands & Queries)   │
-                    └────────────┬────────────┘
-                                 │
-                                 ▼
-                    ┌─────────────────────────┐
-                    │      Domain Layer       │
-                    │  (Pure Models & Traits) │
-                    └────────────┬────────────┘
-                                 │
-                                 ▼
-                    ┌─────────────────────────┐
-                    │  Infrastructure Layer   │
-                    │ (Filesystem, Processes) │
-                    └─────────────────────────┘
-```
+| Method | What it does |
+|---|---|
+| Auto (default) | Runs the AppImage directly. If, and only if, it fails right away with a FUSE, mount or extraction error, it retries with *extract and run*, then with the managed extracted AppDir. A normal application failure is reported and never retried. |
+| Direct | Runs the AppImage directly. |
+| Extract and run | Runs `--appimage-extract-and-run`. Needs no FUSE. |
+| Extracted AppRun | Extracts the AppDir once into AppNest's data folder and runs its `AppRun` with `APPDIR` and `APPIMAGE` set. The extraction is redone if the AppImage file changes. |
 
-* **Zero Business Logic in UI**: GTK widgets only emit user actions and render state updates.
-* **Non-blocking Operations**: Background workers handle heavy tasks (SquashFS extraction, SHA-256 computation, downloads) without freezing the UI.
-* **Testable Without GTK**: Domain, services, repository, and validation logic are unit-tested in headless CI environments.
+A manually selected method is never silently replaced. Startup failures are shown with the program's own error output (also kept in `$XDG_CACHE_HOME/appnest/launch-<id>.log`).
 
----
+## Security model
 
-## 🚀 Key Features
+AppImages are **untrusted third-party programs**. Launching one runs it with your user's permissions. **AppNest is not a sandbox.**
 
-* **🛡️ Adaptive Runtime Manager**:
-  Handles execution across diverse Linux distributions and system setups:
-  1. **Direct Native**: Direct execution of AppImage binary.
-  2. **FUSE / Extract-and-run**: Runs with `--appimage-extract-and-run` if FUSE is unavailable or unprivileged.
-  3. **Extracted AppRun Fallback**: Extracts SquashFS contents and executes `AppRun` directly. This circumvents broken `binfmt_misc` kernel interception (such as orphaned `AppImageLauncher` handlers) and missing FUSE modules.
-* **🖱️ Drag & Drop**: Drop one or multiple `.AppImage` files anywhere onto the window to automatically validate, import, extract icons, and integrate them in the background.
-* **⚡ Non-Blocking Background Operations**: Long-running operations like SquashFS extraction, file importing, and SHA-256 checksum computation run on background worker threads with `glib::spawn_future_local`, keeping the UI responsive at all times.
-* **🔒 SHA-256 Integrity Verification**: On-demand calculation of SHA-256 file hashes with one-click copy to clipboard and persistent database caching.
-* **⌨️ Global Keyboard Accelerators**:
-  - `Ctrl+O` / `Ctrl+N`: Add / Import AppImage
-  - `Ctrl+R` / `F5`: Refresh application library
-  - `Ctrl+F`: Focus search bar
-  - `Ctrl+,`: Open Preferences window
-  - `Ctrl+Q` / `Ctrl+W`: Close application
-* **🎨 Modern Libadwaita Theming**: System theme following, Force Light, and Force Dark color schemes via Libadwaita `StyleManager`.
-* **🔍 Automatic Scanner**: Discovers unmanaged AppImages across standard locations (`~/Applications`, `~/Downloads`, etc.) with one-click non-blocking import.
-* **🖥️ Desktop Integration**: Generates freedesktop `.desktop` entries in `~/.local/share/applications/` and refreshes the desktop application database so installed applications immediately appear in the GNOME Dash, app grid, and application launchers.
-* **🖼️ Multi-Tier Icon Extraction**: Resolves embedded `.DirIcon` symlinks and extracts high-resolution icons (512x512 PNG, SVG) into user icon directories with automatic theme fallbacks.
-* **📂 XDG Compliant**: Adheres to Linux freedesktop specifications for configuration, cache, and data directories.
+What AppNest does to limit the risk of *managing* them:
 
----
+* Metadata and icons are read by extracting only the needed files, never by running the AppImage.
+* Extraction happens in a private staging directory and is checked before it is used: unsafe paths, symlinks that leave the AppDir, special files, set-id bits, and size/file-count limits. A failed or unsafe extraction is never left behind.
+* Names taken from an AppImage are never used as file names. Desktop entries are escaped according to the Desktop Entry Specification, namespaced, and never overwrite files AppNest did not create.
+* AppNest never disables an application's sandbox (for example it does not add `--no-sandbox`).
+* The library database is written atomically, under a lock, keeps a backup, and a damaged file is set aside rather than deleted.
+* AppNest does not touch your default-application settings, does not use the network, and sends no telemetry.
 
-## 📁 Directory Layout
+A calculated SHA-256 only tells you the file's hash. It is not a statement that the application is safe.
 
-Adheres to standard XDG user directory specifications:
+## Not implemented
 
-```text
-~/.local/share/appnest/
-├── applications/             # Managed AppImage binaries
-├── extracted/                # Extracted AppDirs for fallback execution
-├── icons/                    # Application icons
-└── apps.toml                 # Application database & metadata registry
+* Showing AppImages discovered in `~/Applications` or the download folder. The scanner exists (`AppImageScanner`) but is not wired into the interface.
+* Updating AppImages (a new version is added as a separate entry; there is no update checker, replacement or rollback workflow).
+* A command-line interface for managing AppImages (`appnest [FILE...]` only opens files in the window).
+* Separate switches for the menu entry and the desktop shortcut: they are created and removed together.
 
-~/.local/share/applications/  # Freedesktop .desktop entries
-~/.config/appnest/            # Application settings (config.toml)
-~/.cache/appnest/             # Temporary cache and logs
-```
+## Installation
 
----
-
-## 🛠️ Building & Running
+| Distribution | Status |
+|---|---|
+| Fedora | Submitted for review to the official repositories; **not yet available through `dnf` from Fedora**. A Copr project (`kailaz/appnest`) is used for test builds. |
+| Arch Linux | AUR package `appnest` (`packaging/aur`). |
+| Others | Build from source. |
 
 ### Requirements
-* **Rust** 1.80+ (`cargo`, `rustc`)
-* **GTK4** (4.10+)
-* **libadwaita** (1.4+)
-* **7-Zip** (`7z`) or `squashfs-tools` (for SquashFS extraction)
-* `desktop-file-utils`
 
-### Build & Run
+* Rust 1.92 or newer (build only)
+* GTK 4.6+ and libadwaita 1.5+
+* `7z` (the `7zip` package) for reading metadata, icons and extracting AppDirs
+* Optional: `update-desktop-database` (`desktop-file-utils`) to refresh the desktop database right away
+
+### Build and run
+
 ```bash
-# Build release binary
-cargo build --release
+# Fedora
+sudo dnf install cargo gtk4-devel libadwaita-devel 7zip
+# Debian/Ubuntu 24.04
+sudo apt install cargo libgtk-4-dev libadwaita-1-dev p7zip-full
 
-# Run
+cargo build --release --locked
 ./target/release/appnest
 ```
 
-### Run Tests
+### Tests
+
 ```bash
-cargo test
+cargo test --locked
 ```
 
----
+Tests keep all AppNest data, settings and desktop files in temporary directories. Tests that need real SquashFS images are skipped when `mksquashfs` (`squashfs-tools`) or `7z` is missing.
 
-## 📦 Packaging
+### Where data lives
 
-### Arch Linux (AUR)
-
-Install with your preferred AUR helper:
-```bash
-yay -S appnest
-# or
-paru -S appnest
+```text
+$XDG_DATA_HOME/appnest/          (default ~/.local/share/appnest/)
+├── applications/                # AppImages copied into the library
+├── extracted/                   # Extracted AppDirs
+├── icons/
+└── apps.toml                    # Library database (+ .bak backup)
+$XDG_DATA_HOME/applications/     # Menu entries: appnest-<id>.desktop
+$XDG_CONFIG_HOME/appnest/        # config.toml
+$XDG_CACHE_HOME/appnest/         # Launch logs
 ```
 
-Or build and install manually with `makepkg`:
-```bash
-cd packaging/aur
-makepkg -si
+Desktop shortcuts go to the XDG desktop directory.
+
+## Troubleshooting
+
+* **"7-Zip is not installed"**: install the `7zip` package (`p7zip-full` on Debian/Ubuntu).
+* **An AppImage will not start**: the error message shows the program's output. If it mentions FUSE, choose *Extract and run* or *Extracted AppRun* for that application.
+* **"File missing"** on an entry: the AppImage was moved or deleted. Restore the file and refresh, or remove the entry.
+* **"Cannot use ...: Not an AppImage"**: the file lacks the AppImage signature or embedded filesystem, or is for an unsupported CPU architecture.
+
+## Architecture
+
+```text
+src/domain/          models and the repository trait
+src/application/     commands (import, launch, close, remove, update, migrate) and queries
+src/services/        validator, extractor, importer, launcher, scanner, desktop entries
+src/infrastructure/  filesystem, hashing, process handling, TOML repository, settings
+src/ui/              GTK4 / Libadwaita widgets
 ```
 
-### Fedora / DNF / Copr
+Long-running work (listing, scanning for running applications, launching, closing, hashing, extraction) runs on worker threads and reports back to the main loop. `src/ui/window.rs` still contains a good deal of orchestration code that would be better placed in the application layer.
 
-AppNest includes spec and metadata files strictly adhering to Fedora Packaging Guidelines:
-* Spec file: `packaging/rpm/appnest.spec`
-* AppStream metainfo: `resources/io.github._1kailas.AppNest.metainfo.xml`
-* Desktop entry: `packaging/io.github._1kailas.AppNest.desktop`
-* Icon: `resources/icons/io.github._1kailas.AppNest.svg`
+## Packaging
 
-### Validate Packaging Standards
+The Fedora spec (`packaging/rpm/appnest.spec`) follows the Fedora Rust guidelines and builds offline against Fedora's packaged crates, with no vendored dependencies. Validate the metadata with:
+
 ```bash
 desktop-file-validate packaging/io.github._1kailas.AppNest.desktop
 appstreamcli validate --no-net resources/io.github._1kailas.AppNest.metainfo.xml
 ```
 
----
+## Contributing
 
-## 📄 License
+Issues and pull requests are welcome. Before sending a change, run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked`.
 
-This project is licensed under the **GNU General Public License v3.0 (GPL-3.0-or-later)** - see the [LICENSE](LICENSE) file for details.
+## Reporting security issues
+
+Please report vulnerabilities privately, through GitHub's "Report a vulnerability" option on the repository's Security tab or by email to the maintainer, rather than in a public issue.
+
+## License
+
+GNU General Public License v3.0 or later (GPL-3.0-or-later). See [LICENSE](LICENSE).

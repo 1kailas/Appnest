@@ -4,7 +4,7 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>AppNest</name>
-  <summary>A clean, modern AppImage manager built with Rust, GTK4, and Libadwaita</summary>
+  <summary>Manage, integrate, and launch AppImages</summary>
   <description>
     <p>
       AppNest is a high-performance Linux desktop application for managing,
@@ -17,9 +17,9 @@
     </p>
   </description>
   <launchable type="desktop-id">io.github._1kailas.AppNest.desktop</launchable>
-  <url type="homepage">https://github.com/1kailas/appnest</url>
-  <url type="bugtracker">https://github.com/1kailas/appnest/issues</url>
-  <url type="vcs-browser">https://github.com/1kailas/appnest</url>
+  <url type="homepage">https://github.com/1kailas/Appnest</url>
+  <url type="bugtracker">https://github.com/1kailas/Appnest/issues</url>
+  <url type="vcs-browser">https://github.com/1kailas/Appnest</url>
   <developer id="io.github._1kailas">
     <name>1kailas</name>
   </developer>
@@ -28,6 +28,12 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.3.0" date="2026-11-25">
+      <description>
+        <p>Security and reliability release. AppImages are fully validated before use, extraction is isolated and checked, desktop entries are escaped and namespaced, and the application database is transactional and recovers from corruption.</p>
+        <p>Launching now reports startup failures and only falls back to another method when the AppImage runtime itself fails. Launching, scanning and icon extraction no longer block the window. AppNest no longer changes default file associations or disables application sandboxes automatically.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-01">
       <description>
         <p>File manager integration, desktop shortcuts creation, dynamic app process monitoring and termination, layout improvements, and performance optimizations.</p>

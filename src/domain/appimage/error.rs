@@ -21,6 +21,12 @@ pub enum AppImageError {
     #[error("Repository or storage error: {0}")]
     StorageError(String),
 
+    #[error("\"{0}\" is already in AppNest")]
+    AlreadyManaged(String),
+
+    #[error("Unsafe or invalid path: {0}")]
+    UnsafePath(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

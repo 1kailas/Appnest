@@ -103,14 +103,14 @@ impl PreferencesWindow {
             "Auto (Adaptive)",
             "Extracted AppRun",
             "Direct Native",
-            "FUSE / Extract-and-run",
+            "Extract and run (no FUSE)",
         ]);
 
         let initial_idx = match current_settings.default_runtime_method {
             RuntimeMethodPreference::Auto => 0,
             RuntimeMethodPreference::Extracted => 1,
             RuntimeMethodPreference::Native => 2,
-            RuntimeMethodPreference::Fuse => 3,
+            RuntimeMethodPreference::ExtractAndRun => 3,
         };
 
         let runtime_combo = ComboRow::builder()
@@ -162,7 +162,7 @@ impl PreferencesWindow {
                 0 => RuntimeMethodPreference::Auto,
                 1 => RuntimeMethodPreference::Extracted,
                 2 => RuntimeMethodPreference::Native,
-                3 => RuntimeMethodPreference::Fuse,
+                3 => RuntimeMethodPreference::ExtractAndRun,
                 _ => RuntimeMethodPreference::Auto,
             };
             let _ = cs_clone3.save(&s);

@@ -1,0 +1,41 @@
+.TH APPNEST 1 "" "appnest" "User Commands"
+.SH NAME
+appnest \- manage, integrate, and launch AppImages
+.SH SYNOPSIS
+.B appnest
+[\fIOPTION\fR...] [\fIFILE\fR...]
+.SH DESCRIPTION
+.B appnest
+is a graphical manager for AppImage files. It imports AppImages into a library,
+creates application menu entries and icons for them, launches and stops them,
+and can calculate their SHA-256 hashes.
+.PP
+If one or more AppImage files are given on the command line, AppNest opens its
+window and offers to add or run each of them. Only one instance runs at a time;
+files passed to a second invocation are handled by the running instance.
+.SH OPTIONS
+.PP
+AppNest accepts the standard GTK and GApplication options. It does not provide a command-line interface for managing AppImages.
+.TP
+.BR \-h ", " \-\-help
+Show the available options and exit.
+.TP
+.B \-\-help\-all
+Show all options, including those of GTK.
+.TP
+.B \-\-help\-gapplication
+Show the GApplication options.
+.SH FILES
+.TP
+.I $XDG_DATA_HOME/appnest/
+Managed AppImages, extracted AppDirs, icons and the application database
+(default: \fI~/.local/share/appnest/\fR).
+.TP
+.I $XDG_CONFIG_HOME/appnest/config.toml
+User settings (default: \fI~/.config/appnest/config.toml\fR).
+.TP
+.I $XDG_DATA_HOME/applications/
+Desktop entries generated for integrated AppImages (named appnest-<id>.desktop).
+.TP
+.I $XDG_CACHE_HOME/appnest/launch-<id>.log
+Standard error output of the most recent launch of an application.

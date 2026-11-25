@@ -11,6 +11,12 @@ pub struct AppListWidget {
     pub add_first_btn: Button,
 }
 
+impl Default for AppListWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppListWidget {
     pub fn new() -> Self {
         let container = Box::builder()
@@ -90,9 +96,5 @@ impl AppListWidget {
             self.empty_status_page.set_visible(false);
             self.scrolled_window.set_visible(true);
         }
-    }
-
-    pub fn set_empty(&self, is_empty: bool) {
-        self.set_empty_state(!is_empty, false);
     }
 }

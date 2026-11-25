@@ -27,7 +27,8 @@ pub enum RuntimeMethodPreference {
     Auto,
     Extracted,
     Native,
-    Fuse,
+    #[serde(alias = "fuse")]
+    ExtractAndRun,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

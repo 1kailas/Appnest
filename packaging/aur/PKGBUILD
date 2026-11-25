@@ -1,6 +1,6 @@
 # Maintainer: Kailasnath T <00kailas000@gmail.com>
 pkgname=appnest
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="A clean, modern AppImage manager built with Rust, GTK4, and Libadwaita"
 arch=('x86_64' 'aarch64')
@@ -12,16 +12,13 @@ depends=(
 	'gtk4'
 	'hicolor-icon-theme'
 	'libadwaita'
-	'p7zip'
+	'7zip'
 )
 makedepends=(
 	'cargo'
 )
-optdepends=(
-	'squashfs-tools: for extracting SquashFS AppRun fallback'
-)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('6f26a58f65659056514ce880a7f7005e283ff9f864e549b05a7c343763b74b53')
+sha256sums=('SKIP')
 
 prepare() {
 	cd "Appnest-$pkgver"

@@ -1,5 +1,8 @@
-use directories::{BaseDirs, ProjectDirs};
-use std::path::PathBuf;
+use directories::{BaseDirs, ProjectDirs, UserDirs};
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
+
+pub const DESKTOP_FILE_PREFIX: &str = "appnest-";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -13,6 +16,8 @@ pub struct AppPaths {
     pub cache_dir: PathBuf,
     pub desktop_applications_dir: PathBuf,
     pub user_desktop_dir: Option<PathBuf>,
+    pub download_dir: Option<PathBuf>,
+    pub home_applications_dir: Option<PathBuf>,
 }
 
 impl Default for AppPaths {
@@ -22,101 +27,105 @@ impl Default for AppPaths {
 }
 
 impl AppPaths {
+    /// Resolves all locations from the XDG Base Directory and XDG user directory settings.
+    /// Returns `None` when no home directory can be determined.
+    pub fn try_new() -> Option<Self> {
+        let base = BaseDirs::new()?;
+        let proj = ProjectDirs::from("io", "github", "appnest")?;
+        let data_home = base.data_local_dir().to_path_buf();
+
+        // Migrate data and config from the pre-rename "appimage-manager" locations
+        let migrate = |old: PathBuf, new: &Path| {
+            if old.exists() && !new.exists() {
+                let _ = std::fs::rename(&old, new);
+            }
+        };
+        migrate(data_home.join("appimage-manager"), proj.data_local_dir());
+        migrate(
+            base.config_dir().join("appimage-manager"),
+            proj.config_dir(),
+        );
+
+        let user_dirs = UserDirs::new();
+        let mut paths = Self::from_dirs(
+            &data_home,
+            base.config_dir(),
+            base.cache_dir(),
+            user_dirs
+                .as_ref()
+                .and_then(|u| u.desktop_dir())
+                .map(Path::to_path_buf)
+                .filter(|p| p.is_dir()),
+        );
+        paths.download_dir = user_dirs
+            .as_ref()
+            .and_then(|u| u.download_dir())
+            .map(Path::to_path_buf);
+        paths.home_applications_dir = Some(base.home_dir().join("Applications"));
+        Some(paths)
+    }
+
     pub fn new() -> Self {
-        let proj_dirs = ProjectDirs::from("io", "github", "appnest");
-        let base_dirs = BaseDirs::new();
+        Self::try_new().expect("could not determine the user's home directory")
+    }
 
-        let data_dir = proj_dirs
-            .as_ref()
-            .map(|p| p.data_local_dir().to_path_buf())
-            .unwrap_or_else(|| {
-                let mut home = base_dirs
-                    .as_ref()
-                    .map(|b| b.home_dir().to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("/tmp"));
-                home.push(".local/share/appnest");
-                home
-            });
-
-        // Migrate old data directory if needed
-        if let Some(b) = base_dirs.as_ref() {
-            let old_data = b.home_dir().join(".local/share/appimage-manager");
-            if old_data.exists() && !data_dir.exists() {
-                let _ = std::fs::rename(&old_data, &data_dir);
-            }
-        }
-
-        let config_dir = proj_dirs
-            .as_ref()
-            .map(|p| p.config_dir().to_path_buf())
-            .unwrap_or_else(|| {
-                let mut home = base_dirs
-                    .as_ref()
-                    .map(|b| b.home_dir().to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("/tmp"));
-                home.push(".config/appnest");
-                home
-            });
-
-        // Migrate old config directory if needed
-        if let Some(b) = base_dirs.as_ref() {
-            let old_config = b.home_dir().join(".config/appimage-manager");
-            if old_config.exists() && !config_dir.exists() {
-                let _ = std::fs::rename(&old_config, &config_dir);
-            }
-        }
-
-        let cache_dir = proj_dirs
-            .as_ref()
-            .map(|p| p.cache_dir().to_path_buf())
-            .unwrap_or_else(|| {
-                let mut home = base_dirs
-                    .as_ref()
-                    .map(|b| b.home_dir().to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("/tmp"));
-                home.push(".cache/appnest");
-                home
-            });
-
-        let desktop_applications_dir = base_dirs
-            .as_ref()
-            .map(|b| b.data_local_dir().join("applications"))
-            .unwrap_or_else(|| PathBuf::from("/usr/share/applications"));
-
-        let applications_dir = data_dir.join("applications");
-        let extracted_dir = data_dir.join("extracted");
-        let icons_dir = data_dir.join("icons");
-        let database_file = data_dir.join("apps.toml");
-        let config_file = config_dir.join("config.toml");
-
-        let user_desktop_dir = base_dirs
-            .as_ref()
-            .map(|b| b.home_dir().join("Desktop"))
-            .filter(|p| p.is_dir());
-
+    /// Builds all paths from explicit roots. Used by `try_new` and by tests that must not
+    /// touch the real home directory.
+    pub fn from_dirs(
+        data_home: &Path,
+        config_home: &Path,
+        cache_home: &Path,
+        user_desktop_dir: Option<PathBuf>,
+    ) -> Self {
+        let data_dir = data_home.join("appnest");
+        let config_dir = config_home.join("appnest");
         Self {
+            applications_dir: data_dir.join("applications"),
+            extracted_dir: data_dir.join("extracted"),
+            icons_dir: data_dir.join("icons"),
+            database_file: data_dir.join("apps.toml"),
+            config_file: config_dir.join("config.toml"),
+            cache_dir: cache_home.join("appnest"),
+            desktop_applications_dir: data_home.join("applications"),
             data_dir,
-            applications_dir,
-            extracted_dir,
-            icons_dir,
-            database_file,
             config_dir,
-            config_file,
-            cache_dir,
-            desktop_applications_dir,
             user_desktop_dir,
+            download_dir: None,
+            home_applications_dir: None,
         }
     }
 
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.data_dir)?;
-        std::fs::create_dir_all(&self.applications_dir)?;
-        std::fs::create_dir_all(&self.extracted_dir)?;
-        std::fs::create_dir_all(&self.icons_dir)?;
-        std::fs::create_dir_all(&self.config_dir)?;
-        std::fs::create_dir_all(&self.cache_dir)?;
-        std::fs::create_dir_all(&self.desktop_applications_dir)?;
-        Ok(())
+        let private = |p: &Path| {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(p)
+        };
+        for dir in [
+            &self.data_dir,
+            &self.applications_dir,
+            &self.extracted_dir,
+            &self.icons_dir,
+            &self.config_dir,
+            &self.cache_dir,
+        ] {
+            private(dir)?;
+        }
+        std::fs::create_dir_all(&self.desktop_applications_dir)
+    }
+
+    pub fn default_scan_directories(&self) -> Vec<PathBuf> {
+        let mut list = vec![self.applications_dir.clone()];
+        for dir in [&self.home_applications_dir, &self.download_dir]
+            .into_iter()
+            .flatten()
+        {
+            if dir.is_dir() && !list.contains(dir) {
+                list.push(dir.clone());
+            }
+        }
+        list
     }
 
     pub fn app_extracted_dir(&self, app_id: &str) -> PathBuf {
@@ -130,23 +139,6 @@ impl AppPaths {
 
     pub fn app_desktop_file(&self, app_id: &str) -> PathBuf {
         self.desktop_applications_dir
-            .join(format!("{}.desktop", app_id))
-    }
-
-    pub fn default_scan_directories(&self) -> Vec<PathBuf> {
-        let mut list = Vec::new();
-        list.push(self.applications_dir.clone());
-
-        if let Some(base) = BaseDirs::new() {
-            let home_apps = base.home_dir().join("Applications");
-            if home_apps.exists() && !list.contains(&home_apps) {
-                list.push(home_apps);
-            }
-            let downloads = base.home_dir().join("Downloads");
-            if downloads.exists() && !list.contains(&downloads) {
-                list.push(downloads);
-            }
-        }
-        list
+            .join(format!("{}{}.desktop", DESKTOP_FILE_PREFIX, app_id))
     }
 }

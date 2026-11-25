@@ -1,149 +1,286 @@
-use appnest::config::paths::AppPaths;
-use appnest::domain::appimage::{AppImage, AppImageType, Architecture, RuntimeMethod};
+mod common;
+
+use appnest::application::commands::{
+    ImportAppImageCommand, MigrateDesktopEntriesCommand, RemoveAppImageCommand,
+};
+use appnest::config::settings::AppSettings;
+use appnest::domain::appimage::{AppImage, AppImageError};
 use appnest::domain::repository::AppImageRepository;
 use appnest::infrastructure::filesystem_repository::FilesystemAppImageRepository;
-use appnest::services::desktop_entry::DesktopEntryService;
-use appnest::services::extractor::AppImageExtractor;
+use appnest::services::importer::AppImageImporter;
+use appnest::services::launcher::AppImageLauncher;
 use appnest::services::scanner::AppImageScanner;
-use std::fs::File;
-use tempfile::tempdir;
+use common::*;
+use std::fs;
+use std::sync::Arc;
 
-#[test]
-fn test_desktop_entry_creation_and_parsing() {
-    let tmp = tempdir().unwrap();
-    let app_path = tmp.path().join("sample.AppImage");
-    File::create(&app_path).unwrap();
-
-    let mut app = AppImage::new("sample-app", "Sample Application", app_path);
-    app.version = Some("1.2.3".to_string());
-    app.metadata.comment = Some("A cool sample app".to_string());
-    app.metadata.categories = vec!["Utility".to_string(), "Development".to_string()];
-
-    let desktop_dir = tmp.path().join("applications");
-    std::fs::create_dir_all(&desktop_dir).unwrap();
-
-    let desktop_file = DesktopEntryService::create_entry(&app, &desktop_dir).unwrap();
-    assert!(desktop_file.exists());
-
-    let parsed = AppImageExtractor::parse_desktop_file(&desktop_file);
-    assert_eq!(parsed.display_name.as_deref(), Some("Sample Application"));
-    assert_eq!(parsed.comment.as_deref(), Some("A cool sample app"));
-    assert_eq!(parsed.version.as_deref(), Some("1.2.3"));
-    assert_eq!(parsed.categories, vec!["Utility", "Development"]);
-
-    DesktopEntryService::remove_entry(&app, &desktop_dir).unwrap();
-    assert!(!desktop_file.exists());
+struct Fixture {
+    env: TestEnv,
+    repo: Arc<FilesystemAppImageRepository>,
+    cmd: Arc<ImportAppImageCommand>,
 }
 
-#[test]
-fn test_filesystem_repository_crud() {
-    let tmp = tempdir().unwrap();
-    let mut paths = AppPaths::new();
-    paths.database_file = tmp.path().join("apps.toml");
-    paths.applications_dir = tmp.path().join("applications");
-    std::fs::create_dir_all(&paths.applications_dir).unwrap();
-
-    let repo = FilesystemAppImageRepository::new(paths);
-
-    // Initial list is empty
-    let initial = repo.list().unwrap();
-    assert_eq!(initial.len(), 0);
-
-    // Create an app
-    let app_file = tmp.path().join("foo.AppImage");
-    File::create(&app_file).unwrap();
-
-    let mut app = AppImage::new("foo", "Foo App", app_file);
-    app.version = Some("0.1.0".to_string());
-    app.architecture = Architecture::X86_64;
-    app.appimage_type = AppImageType::Type2;
-    app.runtime_method = RuntimeMethod::Auto;
-
-    repo.save(&app).unwrap();
-
-    // Query back
-    let fetched = repo.get_by_id("foo").unwrap().expect("App should exist");
-    assert_eq!(fetched.name, "Foo App");
-    assert_eq!(fetched.version.as_deref(), Some("0.1.0"));
-
-    // Remove
-    repo.remove("foo").unwrap();
-    let after_remove = repo.get_by_id("foo").unwrap();
-    assert!(after_remove.is_none());
+fn fixture() -> Fixture {
+    let env = TestEnv::new();
+    let repo = Arc::new(FilesystemAppImageRepository::new(env.paths.clone()));
+    let importer = Arc::new(AppImageImporter::new(env.paths.clone()));
+    let cmd = Arc::new(ImportAppImageCommand::new(repo.clone(), importer));
+    Fixture { env, repo, cmd }
 }
 
-#[test]
-fn test_scanner_discovers_appimages() {
-    let tmp = tempdir().unwrap();
-    let app1 = tmp.path().join("One.AppImage");
-    let app2 = tmp.path().join("two.appimage");
-    let non_app = tmp.path().join("other.txt");
-
-    File::create(&app1).unwrap();
-    File::create(&app2).unwrap();
-    File::create(&non_app).unwrap();
-
-    let found = AppImageScanner::scan_directory(tmp.path(), 1);
-    assert_eq!(found.len(), 2);
-    assert!(found.contains(&app1));
-    assert!(found.contains(&app2));
-}
-
-#[test]
-fn test_obsidian_icon_extraction() {
-    let app_paths = AppPaths::new();
-    let obsidian = app_paths.applications_dir.join("Obsidian-1.13.7.AppImage");
-    if obsidian.exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let icon = AppImageExtractor::extract_icon_only(
-            &obsidian,
-            tmp.path(),
-            "obsidian",
-            Some("obsidian"),
-        );
-        assert!(icon.is_some());
-        assert!(icon.unwrap().exists());
+fn settings(copy: bool, integrate: bool) -> AppSettings {
+    AppSettings {
+        copy_on_import: copy,
+        auto_integrate_desktop: integrate,
+        ..Default::default()
     }
 }
 
 #[test]
-fn test_appimage_import_and_desktop_integration() {
-    let tmp = tempdir().unwrap();
-    let mut paths = AppPaths::new();
-    paths.database_file = tmp.path().join("apps.toml");
-    paths.applications_dir = tmp.path().join("applications");
-    paths.desktop_applications_dir = tmp.path().join("desktop_entries");
-    paths.icons_dir = tmp.path().join("icons");
-    let _ = paths.ensure_dirs();
+fn import_by_reference_with_desktop_integration() {
+    let f = fixture();
+    let src = simple_appimage(&f.env.root.path().join("my-test-app.AppImage"));
 
-    let repo = FilesystemAppImageRepository::new(paths.clone());
+    let app = f.cmd.execute(&src, &settings(false, true)).unwrap();
+    assert_eq!(app.id, "my-test-app");
+    assert!(!app.managed);
+    assert_eq!(app.path, src);
+    assert!(app.desktop_integrated);
+    assert!(app.desktop_entry_path.as_ref().unwrap().exists());
+    assert!(f
+        .env
+        .paths
+        .user_desktop_dir
+        .as_ref()
+        .unwrap()
+        .join("appnest-my-test-app.desktop")
+        .exists());
+    assert_eq!(f.repo.list().unwrap().len(), 1);
+}
 
-    // Create a mock executable AppImage
-    let app_src = tmp.path().join("my-test-app.AppImage");
-    {
-        use std::io::Write;
-        let mut f = File::create(&app_src).unwrap();
-        let mut content = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0];
-        content.extend_from_slice(&[b'A', b'I', 0x02]);
-        content.resize(128, 0);
-        f.write_all(&content).unwrap();
+#[test]
+fn import_with_copy_keeps_the_original() {
+    let f = fixture();
+    let src = simple_appimage(&f.env.root.path().join("copied.AppImage"));
+    let app = f.cmd.execute(&src, &settings(true, false)).unwrap();
+    assert!(app.managed);
+    assert!(app.path.starts_with(&f.env.paths.applications_dir));
+    assert!(src.exists(), "the user's original must be kept");
+    assert!(!app.desktop_integrated);
+}
+
+#[test]
+fn renamed_elf_is_not_imported() {
+    let f = fixture();
+    let src = f.env.root.path().join("not-really.AppImage");
+    fs::copy("/bin/sh", &src).unwrap();
+    let err = f.cmd.execute(&src, &settings(true, true)).unwrap_err();
+    assert!(matches!(err, AppImageError::InvalidAppImage(_)), "{}", err);
+    assert!(f.repo.list().unwrap().is_empty());
+    assert_eq!(
+        fs::read_dir(&f.env.paths.applications_dir).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn importing_the_same_file_twice_is_reported() {
+    let f = fixture();
+    let src = simple_appimage(&f.env.root.path().join("once.AppImage"));
+    f.cmd.execute(&src, &settings(false, false)).unwrap();
+    let err = f.cmd.execute(&src, &settings(false, false)).unwrap_err();
+    assert!(matches!(err, AppImageError::AlreadyManaged(_)), "{}", err);
+    assert_eq!(f.repo.list().unwrap().len(), 1);
+}
+
+#[test]
+fn importing_an_identical_copy_twice_is_reported() {
+    let f = fixture();
+    let a = simple_appimage(&f.env.dir("one").join("same.AppImage"));
+    let b = simple_appimage(&f.env.dir("two").join("same.AppImage"));
+    f.cmd.execute(&a, &settings(true, false)).unwrap();
+    let err = f.cmd.execute(&b, &settings(true, false)).unwrap_err();
+    assert!(matches!(err, AppImageError::AlreadyManaged(_)), "{}", err);
+    assert_eq!(
+        fs::read_dir(&f.env.paths.applications_dir).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn same_filename_different_content_is_stored_side_by_side() {
+    let f = fixture();
+    let a = appimage_with_marker(&f.env.dir("one").join("tool.AppImage"), "version-1");
+    let b = appimage_with_marker(&f.env.dir("two").join("tool.AppImage"), "version-2");
+
+    let first = f.cmd.execute(&a, &settings(true, false)).unwrap();
+    let second = f.cmd.execute(&b, &settings(true, false)).unwrap();
+
+    assert_ne!(first.id, second.id);
+    assert_ne!(first.path, second.path);
+    assert_eq!(fs::read(&first.path).unwrap(), fs::read(&a).unwrap());
+    assert_eq!(fs::read(&second.path).unwrap(), fs::read(&b).unwrap());
+    assert_eq!(f.repo.list().unwrap().len(), 2);
+}
+
+#[test]
+fn concurrent_imports_get_unique_ids_and_none_are_lost() {
+    let f = fixture();
+    let sources: Vec<_> = (0..6)
+        .map(|i| {
+            appimage_with_marker(
+                &f.env.dir(&format!("src{}", i)).join("same-name.AppImage"),
+                &format!("content-{}", i),
+            )
+        })
+        .collect();
+
+    let handles: Vec<_> = sources
+        .into_iter()
+        .map(|src| {
+            let cmd = Arc::clone(&f.cmd);
+            std::thread::spawn(move || cmd.execute(&src, &settings(true, true)).unwrap())
+        })
+        .collect();
+    let apps: Vec<AppImage> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    let mut ids: Vec<_> = apps.iter().map(|a| a.id.clone()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 6);
+    let fresh = FilesystemAppImageRepository::new(f.env.paths.clone());
+    assert_eq!(fresh.list().unwrap().len(), 6);
+    assert_eq!(
+        fs::read_dir(&f.env.paths.applications_dir).unwrap().count(),
+        6
+    );
+}
+
+struct FailingRepo;
+impl AppImageRepository for FailingRepo {
+    fn list(&self) -> Result<Vec<AppImage>, AppImageError> {
+        Ok(Vec::new())
     }
+    fn get_by_id(&self, _: &str) -> Result<Option<AppImage>, AppImageError> {
+        Ok(None)
+    }
+    fn save(&self, _: &AppImage) -> Result<(), AppImageError> {
+        Err(AppImageError::StorageError("disk full".into()))
+    }
+    fn remove(&self, _: &str) -> Result<(), AppImageError> {
+        Ok(())
+    }
+}
 
-    let importer = appnest::services::importer::AppImageImporter::new(paths.clone());
-    let mut settings = appnest::config::settings::AppSettings::default();
-    settings.auto_integrate_desktop = true;
-    settings.copy_on_import = false;
+#[test]
+fn failed_import_leaves_nothing_behind() {
+    let env = TestEnv::new();
+    let importer = Arc::new(AppImageImporter::new(env.paths.clone()));
+    let cmd = ImportAppImageCommand::new(Arc::new(FailingRepo), importer);
+    let src = simple_appimage(&env.root.path().join("doomed.AppImage"));
 
-    let imported = importer.import(&app_src, &settings).unwrap();
-    assert_eq!(imported.name, "my-test-app");
-    assert!(imported.desktop_integrated);
-    assert!(imported.desktop_entry_path.is_some());
-    assert!(imported.desktop_entry_path.as_ref().unwrap().exists());
+    assert!(cmd.execute(&src, &settings(true, true)).is_err());
 
-    // Save in repo
-    repo.save(&imported).unwrap();
-    let listed = repo.list().unwrap();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].id, imported.id);
-    assert!(listed[0].desktop_integrated);
+    assert_eq!(
+        fs::read_dir(&env.paths.applications_dir).unwrap().count(),
+        0
+    );
+    assert_eq!(fs::read_dir(&env.paths.icons_dir).unwrap().count(), 0);
+    let desktop_files = |dir: &std::path::Path| {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "desktop"))
+            .count()
+    };
+    assert_eq!(desktop_files(&env.paths.desktop_applications_dir), 0);
+    assert_eq!(
+        desktop_files(env.paths.user_desktop_dir.as_ref().unwrap()),
+        0
+    );
+    assert!(src.exists());
+}
+
+#[test]
+fn scanner_only_reports_real_appimages() {
+    let env = TestEnv::new();
+    let dir = env.dir("downloads");
+    simple_appimage(&dir.join("real.AppImage"));
+    fs::copy("/bin/sh", dir.join("fake.AppImage")).unwrap();
+    fs::write(dir.join("notes.txt"), "hi").unwrap();
+
+    let found = AppImageScanner::scan_directory(&dir, 2);
+    assert_eq!(found, vec![dir.join("real.AppImage")]);
+}
+
+#[test]
+fn removal_never_deletes_files_outside_appnests_directories() {
+    let f = fixture();
+    let launcher = Arc::new(AppImageLauncher::new(f.env.paths.clone()));
+    let remove = RemoveAppImageCommand::new(f.repo.clone(), f.env.paths.clone(), launcher);
+
+    let user_file = f.env.root.path().join("important.png");
+    let user_appimage = simple_appimage(&f.env.root.path().join("keep-me.AppImage"));
+    fs::write(&user_file, "precious").unwrap();
+
+    let mut app = AppImage::new("tampered", "Tampered", user_appimage.clone());
+    app.managed = true; // claims to be managed, but the file is outside the managed directory
+    app.icon_path = Some(user_file.clone());
+    f.repo.save(&app).unwrap();
+
+    remove.execute("tampered", true).unwrap();
+    assert!(f.repo.list().unwrap().is_empty());
+    assert!(user_file.exists());
+    assert!(user_appimage.exists());
+}
+
+#[test]
+fn removal_deletes_managed_copy_but_not_a_referenced_original() {
+    let f = fixture();
+    let launcher = Arc::new(AppImageLauncher::new(f.env.paths.clone()));
+    let remove = RemoveAppImageCommand::new(f.repo.clone(), f.env.paths.clone(), launcher);
+
+    let referenced = simple_appimage(&f.env.root.path().join("ref.AppImage"));
+    let r = f.cmd.execute(&referenced, &settings(false, true)).unwrap();
+    let copied_src = appimage_with_marker(&f.env.root.path().join("cp.AppImage"), "x");
+    let c = f.cmd.execute(&copied_src, &settings(true, true)).unwrap();
+
+    remove.execute(&r.id, true).unwrap();
+    remove.execute(&c.id, true).unwrap();
+
+    assert!(
+        referenced.exists(),
+        "a referenced AppImage must never be deleted"
+    );
+    assert!(copied_src.exists());
+    assert!(!c.path.exists(), "the managed copy is deleted");
+    assert!(!r.desktop_entry_path.unwrap().exists());
+    assert!(!c.desktop_entry_path.unwrap().exists());
+}
+
+#[test]
+fn startup_migration_renames_legacy_menu_entries() {
+    let f = fixture();
+    let src = simple_appimage(&f.env.root.path().join("oldapp.AppImage"));
+    let mut app = f.cmd.execute(&src, &settings(false, true)).unwrap();
+
+    // Put the entry back where version 0.2 would have written it
+    let new_entry = app.desktop_entry_path.clone().unwrap();
+    let legacy = f.env.paths.desktop_applications_dir.join("oldapp.desktop");
+    fs::rename(&new_entry, &legacy).unwrap();
+    app.desktop_entry_path = Some(legacy.clone());
+    f.repo.save(&app).unwrap();
+
+    MigrateDesktopEntriesCommand::new(f.repo.clone(), f.env.paths.clone()).execute();
+
+    assert!(!legacy.exists());
+    assert!(new_entry.exists());
+    assert_eq!(
+        f.repo
+            .get_by_id("oldapp")
+            .unwrap()
+            .unwrap()
+            .desktop_entry_path,
+        Some(new_entry)
+    );
 }

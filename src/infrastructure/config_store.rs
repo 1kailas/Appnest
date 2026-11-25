@@ -37,6 +37,6 @@ impl ConfigStore {
     pub fn save(&self, settings: &AppSettings) -> Result<(), std::io::Error> {
         let serialized = toml::to_string_pretty(settings)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        FileSystem::atomic_write(&self.paths.config_file, &serialized)
+        FileSystem::atomic_write_private(&self.paths.config_file, &serialized)
     }
 }

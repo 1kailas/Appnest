@@ -2,7 +2,6 @@ use super::metadata::AppImageMetadata;
 use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -53,7 +52,8 @@ pub enum RuntimeMethod {
     Auto,
     Extracted,
     Native,
-    Fuse,
+    #[serde(alias = "fuse")]
+    ExtractAndRun,
 }
 
 impl std::fmt::Display for RuntimeMethod {
@@ -62,7 +62,7 @@ impl std::fmt::Display for RuntimeMethod {
             RuntimeMethod::Auto => write!(f, "Auto (Adaptive)"),
             RuntimeMethod::Extracted => write!(f, "Extracted AppRun"),
             RuntimeMethod::Native => write!(f, "Direct Native"),
-            RuntimeMethod::Fuse => write!(f, "FUSE / Extract-and-run"),
+            RuntimeMethod::ExtractAndRun => write!(f, "Extract and run (no FUSE)"),
         }
     }
 }
@@ -98,6 +98,10 @@ pub struct AppImage {
     pub metadata: AppImageMetadata,
     #[serde(default)]
     pub sha256: Option<String>,
+    #[serde(default)]
+    pub sha256_size: Option<u64>,
+    #[serde(default)]
+    pub sha256_mtime: Option<u64>,
 }
 
 impl AppImage {
@@ -126,6 +130,8 @@ impl AppImage {
             desktop_integrated: false,
             metadata: AppImageMetadata::default(),
             sha256: None,
+            sha256_size: None,
+            sha256_mtime: None,
         }
     }
 
@@ -164,7 +170,7 @@ impl AppImage {
                     format!("\"{}\"", self.path.display())
                 }
             }
-            RuntimeMethod::Fuse => {
+            RuntimeMethod::ExtractAndRun => {
                 format!("\"{}\" --appimage-extract-and-run", self.path.display())
             }
             RuntimeMethod::Native => {
@@ -183,28 +189,36 @@ impl AppImage {
             }
         };
 
-        if let Some(ref args) = self.metadata.exec_args {
-            if args.contains("--no-sandbox") && !base.contains("--no-sandbox") {
-                return format!("{} --no-sandbox", base);
-            }
-        }
         base
     }
 
-    pub fn calculate_sha256(&self) -> Option<String> {
-        if !self.path.exists() {
-            return None;
-        }
+    pub fn exists(&self) -> bool {
+        self.path.is_file()
+    }
 
-        let output = Command::new("sha256sum").arg(&self.path).output().ok()?;
+    fn file_stamp(&self) -> Option<(u64, u64)> {
+        let meta = std::fs::metadata(&self.path).ok()?;
+        let mtime = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        Some((meta.len(), mtime))
+    }
 
-        if output.status.success() {
-            let out_str = String::from_utf8_lossy(&output.stdout);
-            let hash = out_str.split_whitespace().next()?;
-            Some(hash.to_string())
-        } else {
-            None
-        }
+    /// The stored SHA-256 hash, only if the file has not changed since it was computed.
+    pub fn cached_sha256(&self) -> Option<&str> {
+        let hash = self.sha256.as_deref()?;
+        let stamp = self.file_stamp()?;
+        (self.sha256_size == Some(stamp.0) && self.sha256_mtime == Some(stamp.1)).then_some(hash)
+    }
+
+    pub fn set_sha256(&mut self, hash: String) {
+        let stamp = self.file_stamp();
+        self.sha256 = Some(hash);
+        self.sha256_size = stamp.map(|s| s.0);
+        self.sha256_mtime = stamp.map(|s| s.1);
     }
 
     pub fn is_extracted(&self) -> bool {
@@ -227,14 +241,13 @@ impl AppImage {
             if c.is_ascii_alphanumeric() {
                 clean.push(c.to_ascii_lowercase());
                 last_dash = false;
-            } else if c == '-' || c == '_' || c == ' ' || c == '.' {
-                if !last_dash && !clean.is_empty() {
-                    clean.push('-');
-                    last_dash = true;
-                }
+            } else if matches!(c, '-' | '_' | ' ' | '.') && !last_dash && !clean.is_empty() {
+                clean.push('-');
+                last_dash = true;
             }
         }
-        let trimmed = clean.trim_matches('-').to_string();
+        let trimmed: String = clean.chars().take(64).collect();
+        let trimmed = trimmed.trim_matches('-').to_string();
         if trimmed.is_empty() {
             "appimage-item".to_string()
         } else {

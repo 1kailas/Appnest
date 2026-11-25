@@ -30,7 +30,7 @@ impl UpdateAppImageCommand {
         // If switched to Extracted, ensure extracted folder exists
         if method == RuntimeMethod::Extracted && !app.is_extracted() {
             let target = self.paths.app_extracted_dir(&app.id);
-            AppImageExtractor::extract_appdir(&app.path, &target)?;
+            AppImageExtractor::extract_appdir(&app.path, &target, false)?;
             app.extracted_dir = Some(target);
         }
 
@@ -85,7 +85,7 @@ impl UpdateAppImageCommand {
             .ok_or_else(|| AppImageError::NotFound(std::path::PathBuf::from(id)))?;
 
         let target = self.paths.app_extracted_dir(&app.id);
-        AppImageExtractor::extract_appdir(&app.path, &target)?;
+        AppImageExtractor::extract_appdir(&app.path, &target, false)?;
         app.extracted_dir = Some(target);
 
         if app.desktop_integrated {

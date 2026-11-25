@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
 
-VERSION="0.2.0"
 NAME="appnest"
+VERSION="$(awk '/^Version:/ {print $2; exit}' "packaging/rpm/${NAME}.spec")"
 
 echo "=== 1. Checking required tools ==="
 MISSING_TOOLS=()
@@ -17,7 +17,7 @@ for tool in rpmbuild rpmlint fedora-review rpmdev-setuptree; do
 done
 
 if [ ${#MISSING_TOOLS[@]} -ne 0 ]; then
-    echo "⚠️  Missing required Fedora review tools: ${MISSING_TOOLS[*]}"
+    echo "Missing required Fedora review tools: ${MISSING_TOOLS[*]}"
     echo "Please run the following command in your terminal with your password:"
     echo ""
     echo "  sudo dnf install -y fedora-packager rpmdevtools rpmlint mock fedora-review cargo-rpm-macros"
@@ -31,7 +31,7 @@ rpmdev-setuptree
 echo "=== 3. Placing Source Tarball & Spec File ==="
 if [ ! -f "dist/${NAME}-${VERSION}.tar.gz" ]; then
     mkdir -p dist
-    git archive --format=tar.gz --prefix="${NAME}-${VERSION}/" -o "dist/${NAME}-${VERSION}.tar.gz" HEAD
+    git archive --format=tar.gz --prefix="Appnest-${VERSION}/" -o "dist/${NAME}-${VERSION}.tar.gz" HEAD
 fi
 
 cp "dist/${NAME}-${VERSION}.tar.gz" "${HOME}/rpmbuild/SOURCES/${NAME}-${VERSION}.tar.gz"
@@ -41,7 +41,7 @@ echo "=== 4. Building Source RPM (SRPM) ==="
 rpmbuild -bs "${HOME}/rpmbuild/SPECS/${NAME}.spec"
 
 SRPM_FILE=$(find "${HOME}/rpmbuild/SRPMS" -name "${NAME}-${VERSION}-*.src.rpm" | head -n 1)
-echo "✅ SRPM built: ${SRPM_FILE}"
+echo "SRPM built: ${SRPM_FILE}"
 cp "${SRPM_FILE}" "dist/"
 
 echo "=== 5. Running rpmlint on Spec and SRPM ==="
@@ -49,5 +49,5 @@ rpmlint "${HOME}/rpmbuild/SPECS/${NAME}.spec"
 rpmlint "${SRPM_FILE}"
 
 echo "=== 6. Running fedora-review ==="
-echo "Running: fedora-review -b ${SRPM_FILE}"
-fedora-review -b "${SRPM_FILE}"
+echo "Running: fedora-review -r -n ${SRPM_FILE}"
+fedora-review -r -n "${SRPM_FILE}"
