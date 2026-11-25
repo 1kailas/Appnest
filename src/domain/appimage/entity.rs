@@ -95,6 +95,8 @@ pub struct AppImage {
     #[serde(default)]
     pub desktop_integrated: bool,
     #[serde(default)]
+    pub desktop_shortcut: bool,
+    #[serde(default)]
     pub metadata: AppImageMetadata,
     #[serde(default)]
     pub sha256: Option<String>,
@@ -128,6 +130,7 @@ impl AppImage {
             installed_at: now,
             managed: true,
             desktop_integrated: false,
+            desktop_shortcut: false,
             metadata: AppImageMetadata::default(),
             sha256: None,
             sha256_size: None,

@@ -141,3 +141,109 @@ pub fn appdir_appimage(path: &Path, setup: impl FnOnce(&Path)) -> PathBuf {
 pub fn script(path: &Path, body: &str) {
     write_executable(path, format!("#!/bin/sh\n{}\n", body).as_bytes());
 }
+
+/// An AppImage with a hand-built ELF that has a genuine `.upd_info` section (as written by
+/// appimagetool), followed by a minimal "filesystem". It is a valid AppImage as far as
+/// AppNest's validator is concerned, but it is not executable.
+pub fn upd_info_appimage(path: &Path, info: &str) -> PathBuf {
+    let shstrtab = b"\0.shstrtab\0.upd_info\0";
+    let str_off = 64u64;
+    let upd_off = str_off + shstrtab.len() as u64;
+    let table_off = upd_off + 1024;
+
+    let mut elf = vec![0u8; 64];
+    elf[0..4].copy_from_slice(b"\x7fELF");
+    elf[4] = 2; // 64-bit
+    elf[5] = 1; // little endian
+    elf[6] = 1;
+    elf[8..11].copy_from_slice(b"AI\x02");
+    elf[16..18].copy_from_slice(&2u16.to_le_bytes());
+    elf[18..20].copy_from_slice(&62u16.to_le_bytes());
+    elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    elf[40..48].copy_from_slice(&table_off.to_le_bytes());
+    elf[52..54].copy_from_slice(&64u16.to_le_bytes());
+    elf[58..60].copy_from_slice(&64u16.to_le_bytes());
+    elf[60..62].copy_from_slice(&3u16.to_le_bytes());
+    elf[62..64].copy_from_slice(&1u16.to_le_bytes());
+
+    elf.extend_from_slice(shstrtab);
+    let mut section = info.as_bytes().to_vec();
+    section.resize(1024, 0);
+    elf.extend_from_slice(&section);
+
+    let header = |name: u32, ty: u32, off: u64, size: u64| {
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&name.to_le_bytes());
+        h[4..8].copy_from_slice(&ty.to_le_bytes());
+        h[24..32].copy_from_slice(&off.to_le_bytes());
+        h[32..40].copy_from_slice(&size.to_le_bytes());
+        h
+    };
+    elf.extend_from_slice(&[0u8; 64]);
+    elf.extend_from_slice(&header(1, 3, str_off, shstrtab.len() as u64));
+    elf.extend_from_slice(&header(11, 1, upd_off, 1024));
+    elf.extend_from_slice(b"hsqs");
+    elf.resize(elf.len() + 256, 0);
+    write_executable(path, &elf);
+    path.to_path_buf()
+}
+
+/// A minimal HTTP server on the loopback interface for update tests.
+pub struct TestServer {
+    pub base: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TestServer {
+    /// `routes` maps a request path to a response body; anything else is a 404.
+    pub fn start(
+        routes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    ) -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let handle = std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                let Ok((mut conn, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                };
+                conn.set_nonblocking(false).unwrap();
+                let mut buf = [0u8; 4096];
+                let n = conn.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let body = routes.lock().unwrap().get(&path).cloned();
+                let (status, body) = match body {
+                    Some(b) => ("200 OK", b),
+                    None => ("404 Not Found", b"not found".to_vec()),
+                };
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    status,
+                    body.len()
+                );
+                let _ = conn.write_all(&body);
+            }
+        });
+        Self {
+            base,
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}

@@ -45,6 +45,7 @@ impl UpdateAppImageCommand {
         Ok(app)
     }
 
+    /// Adds or removes the application menu entry. The desktop shortcut is independent.
     pub fn set_desktop_integration(
         &self,
         id: &str,
@@ -58,20 +59,43 @@ impl UpdateAppImageCommand {
         if enable {
             let desktop_path =
                 DesktopEntryService::create_entry(&app, &self.paths.desktop_applications_dir)?;
-            let _ = DesktopEntryService::create_user_desktop_shortcut(
-                &app,
-                self.paths.user_desktop_dir.as_deref(),
-            );
             app.desktop_entry_path = Some(desktop_path);
             app.desktop_integrated = true;
         } else {
             DesktopEntryService::remove_entry(&app, &self.paths.desktop_applications_dir)?;
+            app.desktop_entry_path = None;
+            app.desktop_integrated = false;
+        }
+
+        self.repository.save(&app)?;
+        Ok(app)
+    }
+
+    /// Adds or removes the shortcut on the user's desktop. The menu entry is independent.
+    pub fn set_desktop_shortcut(&self, id: &str, enable: bool) -> Result<AppImage, AppImageError> {
+        let mut app = self
+            .repository
+            .get_by_id(id)?
+            .ok_or_else(|| AppImageError::NotFound(std::path::PathBuf::from(id)))?;
+
+        if enable {
+            DesktopEntryService::create_user_desktop_shortcut(
+                &app,
+                self.paths.user_desktop_dir.as_deref(),
+            )
+            .ok_or_else(|| {
+                AppImageError::DesktopEntryError(
+                    "No desktop folder is available, or a file with that name already exists"
+                        .to_string(),
+                )
+            })?;
+            app.desktop_shortcut = true;
+        } else {
             DesktopEntryService::remove_user_desktop_shortcut(
                 &app,
                 self.paths.user_desktop_dir.as_deref(),
             );
-            app.desktop_entry_path = None;
-            app.desktop_integrated = false;
+            app.desktop_shortcut = false;
         }
 
         self.repository.save(&app)?;

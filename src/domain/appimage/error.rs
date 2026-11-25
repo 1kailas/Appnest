@@ -27,6 +27,9 @@ pub enum AppImageError {
     #[error("Unsafe or invalid path: {0}")]
     UnsafePath(String),
 
+    #[error("Update error: {0}")]
+    UpdateError(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

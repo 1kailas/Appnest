@@ -9,7 +9,12 @@ use libadwaita::prelude::*;
 use libadwaita::{
     ActionRow, ComboRow, PreferencesDialog, PreferencesGroup, PreferencesPage, SwitchRow,
 };
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
+
+type SharedHook = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
 pub struct PreferencesWindow;
 
@@ -63,13 +68,18 @@ impl PreferencesWindow {
         paths_group.add(&copy_switch);
 
         let desktop_switch = SwitchRow::builder()
-            .title("Automatic Desktop Integration")
-            .subtitle(
-                "Create .desktop entry in ~/.local/share/applications for system menus and dock",
-            )
+            .title("Create Application Menu Entries")
+            .subtitle("Add imported AppImages to the system's application menu")
             .active(current_settings.auto_integrate_desktop)
             .build();
         paths_group.add(&desktop_switch);
+
+        let shortcut_switch = SwitchRow::builder()
+            .title("Create Desktop Shortcuts")
+            .subtitle("Also place a launcher on your desktop when an AppImage is added")
+            .active(current_settings.auto_desktop_shortcut)
+            .build();
+        paths_group.add(&shortcut_switch);
 
         let open_dir_row = ActionRow::builder()
             .title("Open Applications Directory")
@@ -123,6 +133,112 @@ impl PreferencesWindow {
 
         page.add(&exec_group);
 
+        // Group 4: folders searched for AppImages that are not in the library yet
+        let scan_group = PreferencesGroup::builder()
+            .title("Discovery")
+            .description("Folders searched for AppImages to offer for import. Press refresh to search again.")
+            .build();
+        let scan_dirs: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(
+            if current_settings.scan_directories.is_empty() {
+                paths.default_scan_directories()
+            } else {
+                current_settings.scan_directories.clone()
+            },
+        ));
+        let scan_rows: Rc<RefCell<Vec<ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+        let add_folder_row = ActionRow::builder()
+            .title("Add Folder")
+            .activatable(true)
+            .build();
+        let add_folder_btn = Button::builder()
+            .icon_name("folder-new-symbolic")
+            .valign(gtk4::Align::Center)
+            .tooltip_text("Choose a folder to search")
+            .build();
+        add_folder_btn.add_css_class("flat");
+        add_folder_row.add_suffix(&add_folder_btn);
+        scan_group.add(&add_folder_row);
+        page.add(&scan_group);
+
+        let rebuild: SharedHook = Rc::new(RefCell::new(None));
+        {
+            let scan_group = scan_group.clone();
+            let scan_dirs = Rc::clone(&scan_dirs);
+            let scan_rows = Rc::clone(&scan_rows);
+            let config_store = Arc::clone(&config_store);
+            let rebuild_weak = Rc::downgrade(&rebuild);
+            let f: Rc<dyn Fn()> = Rc::new(move || {
+                for row in scan_rows.borrow_mut().drain(..) {
+                    scan_group.remove(&row);
+                }
+                let mut settings = config_store.load();
+                settings.scan_directories = scan_dirs.borrow().clone();
+                let _ = config_store.save(&settings);
+
+                for (index, dir) in scan_dirs.borrow().iter().enumerate() {
+                    let row = ActionRow::builder()
+                        .title(gtk4::glib::markup_escape_text(&dir.to_string_lossy()))
+                        .build();
+                    let remove = Button::builder()
+                        .icon_name("user-trash-symbolic")
+                        .valign(gtk4::Align::Center)
+                        .tooltip_text("Stop searching this folder")
+                        .build();
+                    remove.add_css_class("flat");
+                    let scan_dirs = Rc::clone(&scan_dirs);
+                    let rebuild_weak = rebuild_weak.clone();
+                    remove.connect_clicked(move |_| {
+                        if index < scan_dirs.borrow().len() {
+                            scan_dirs.borrow_mut().remove(index);
+                        }
+                        if let Some(rebuild) = rebuild_weak.upgrade() {
+                            if let Some(f) = rebuild.borrow().clone() {
+                                f();
+                            }
+                        }
+                    });
+                    row.add_suffix(&remove);
+                    scan_group.add(&row);
+                    scan_rows.borrow_mut().push(row);
+                }
+            });
+            *rebuild.borrow_mut() = Some(f);
+        }
+        if let Some(f) = rebuild.borrow().clone() {
+            // Show the rows without rewriting an untouched configuration
+            let saved = config_store.load();
+            f();
+            let _ = config_store.save(&saved);
+        }
+
+        {
+            let parent = parent.clone();
+            let scan_dirs = Rc::clone(&scan_dirs);
+            let rebuild = Rc::clone(&rebuild);
+            add_folder_btn.connect_clicked(move |_| {
+                let window = parent.root().and_downcast::<gtk4::Window>();
+                let chooser = gtk4::FileDialog::builder()
+                    .title("Choose a Folder to Search")
+                    .build();
+                let scan_dirs = Rc::clone(&scan_dirs);
+                let rebuild = Rc::clone(&rebuild);
+                chooser.select_folder(
+                    window.as_ref(),
+                    None::<&gtk4::gio::Cancellable>,
+                    move |result| {
+                        if let Some(path) = result.ok().and_then(|f| f.path()) {
+                            if !scan_dirs.borrow().contains(&path) {
+                                scan_dirs.borrow_mut().push(path);
+                                if let Some(f) = rebuild.borrow().clone() {
+                                    f();
+                                }
+                            }
+                        }
+                    },
+                );
+            });
+        }
+
         let dialog = PreferencesDialog::builder().title("Preferences").build();
         dialog.add(&page);
 
@@ -153,6 +269,13 @@ impl PreferencesWindow {
             let mut s = cs_clone2.load();
             s.auto_integrate_desktop = sw.is_active();
             let _ = cs_clone2.save(&s);
+        });
+
+        let cs_clone_shortcut = Arc::clone(&config_store);
+        shortcut_switch.connect_active_notify(move |sw| {
+            let mut s = cs_clone_shortcut.load();
+            s.auto_desktop_shortcut = sw.is_active();
+            let _ = cs_clone_shortcut.save(&s);
         });
 
         let cs_clone3 = Arc::clone(&config_store);

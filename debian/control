@@ -1,0 +1,49 @@
+Source: appnest
+Section: utils
+Priority: optional
+Maintainer: Kailasnath T <00kailas000@gmail.com>
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 13),
+ dh-cargo (>= 32),
+ rustc,
+ cargo,
+ pkg-config,
+ desktop-file-utils,
+ libgtk-4-dev (>= 4.10),
+ libadwaita-1-dev (>= 1.5),
+ librust-gtk4-dev (>= 0.11),
+ librust-libadwaita-dev,
+ librust-gio-dev,
+ librust-glib-dev,
+ librust-serde-dev,
+ librust-toml-dev,
+ librust-thiserror-dev,
+ librust-directories-dev,
+ librust-walkdir-dev,
+ librust-tempfile-dev,
+ librust-chrono-dev,
+ librust-async-channel-dev,
+ librust-libc-dev,
+ librust-sha2-dev,
+ librust-sha1-dev,
+ librust-serde-json-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/1kailas/Appnest
+Vcs-Browser: https://github.com/1kailas/Appnest
+Vcs-Git: https://github.com/1kailas/Appnest.git
+
+Package: appnest
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, 7zip, curl
+Built-Using: ${cargo:Built-Using}
+Static-Built-Using: ${cargo:Static-Built-Using}
+Recommends: desktop-file-utils
+Description: manage, integrate, and launch AppImages
+ AppNest is a desktop application for managing, organizing, integrating, and
+ launching AppImages. It imports AppImages into a managed library, creates
+ desktop entries and icons for them, discovers AppImages that are not managed
+ yet, checks for updates published inside the AppImages, and can verify their
+ SHA-256 hashes. Every feature is also available on the command line.
+ .
+ An adaptive runtime (direct execution, extract-and-run, or running the
+ extracted AppRun) lets AppImages start even when FUSE is unavailable.

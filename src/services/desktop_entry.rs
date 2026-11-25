@@ -1,5 +1,5 @@
 use crate::config::paths::DESKTOP_FILE_PREFIX;
-use crate::domain::appimage::{AppImage, AppImageError, RuntimeMethod};
+use crate::domain::appimage::{AppImage, AppImageError};
 use crate::infrastructure::filesystem::FileSystem;
 use gio::prelude::*;
 use std::io::Read;
@@ -109,18 +109,9 @@ impl DesktopEntryService {
     }
 
     pub fn generate_entry_content(app: &AppImage) -> String {
-        let target = match app.runtime_method {
-            RuntimeMethod::Extracted => app.apprun_path().filter(|a| a.exists()),
-            RuntimeMethod::Auto if app.is_extracted() => app.apprun_path(),
-            _ => None,
-        }
-        .unwrap_or_else(|| app.path.clone());
-
-        let mut exec = quote_exec_arg(&target.to_string_lossy());
-        if app.runtime_method == RuntimeMethod::ExtractAndRun {
-            exec.push_str(" --appimage-extract-and-run");
-        }
-        exec.push_str(" %U");
+        // Launching goes through AppNest so every entry point (menu, shortcut, terminal, file
+        // manager) uses the same launch logic, failure detection and fallbacks.
+        let exec = format!("appnest launch {} -- %U", quote_exec_arg(&app.id));
 
         let mut lines = vec![
             "[Desktop Entry]".to_string(),
@@ -233,7 +224,23 @@ impl DesktopEntryService {
             gio::FileQueryInfoFlags::NONE,
             gio::Cancellable::NONE,
         );
+        Self::remove_legacy(app, desktop_dir);
         Some(dest)
+    }
+
+    pub fn has_shortcut(app: &AppImage, desktop_dir: &Path) -> bool {
+        Self::entry_path(app, desktop_dir).is_ok_and(|p| is_owned_entry(&p, &app.id))
+    }
+
+    pub fn has_legacy_shortcut(app: &AppImage, desktop_dir: &Path) -> bool {
+        Self::legacy_names(app)
+            .iter()
+            .any(|n| is_owned_entry(&desktop_dir.join(n), &app.id))
+    }
+
+    /// True if the entry at `path` already has exactly the content that would be generated.
+    pub fn is_current(app: &AppImage, path: &Path) -> bool {
+        std::fs::read_to_string(path).is_ok_and(|c| c == Self::generate_entry_content(app))
     }
 
     /// Removes only shortcuts that AppNest created for this application.

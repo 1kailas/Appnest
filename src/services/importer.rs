@@ -134,11 +134,14 @@ impl AppImageImporter {
             {
                 app.desktop_entry_path = Some(entry);
                 app.desktop_integrated = true;
-                let _ = DesktopEntryService::create_user_desktop_shortcut(
-                    &app,
-                    self.paths.user_desktop_dir.as_deref(),
-                );
             }
+        }
+        if settings.auto_desktop_shortcut {
+            app.desktop_shortcut = DesktopEntryService::create_user_desktop_shortcut(
+                &app,
+                self.paths.user_desktop_dir.as_deref(),
+            )
+            .is_some();
         }
 
         Ok(app)

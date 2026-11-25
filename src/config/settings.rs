@@ -32,9 +32,11 @@ pub enum RuntimeMethodPreference {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub copy_on_import: bool,
     pub auto_integrate_desktop: bool,
+    pub auto_desktop_shortcut: bool,
     pub scan_directories: Vec<PathBuf>,
     pub default_runtime_method: RuntimeMethodPreference,
     pub theme: ThemePreference,
@@ -45,6 +47,7 @@ impl Default for AppSettings {
         Self {
             copy_on_import: true,
             auto_integrate_desktop: true,
+            auto_desktop_shortcut: true,
             scan_directories: Vec::new(),
             default_runtime_method: RuntimeMethodPreference::Auto,
             theme: ThemePreference::System,

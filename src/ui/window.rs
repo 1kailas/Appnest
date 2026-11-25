@@ -1,6 +1,6 @@
 use crate::application::commands::{
     CloseAppImageCommand, ImportAppImageCommand, LaunchAppImageCommand, RemoveAppImageCommand,
-    UpdateAppImageCommand,
+    ReplaceAppImageCommand, UpdateAppImageCommand,
 };
 use crate::application::queries::{AppImagesListing, ListAppImagesQuery};
 use crate::config::paths::AppPaths;
@@ -13,6 +13,7 @@ use crate::services::desktop_entry::DesktopEntryService;
 use crate::services::extractor::AppImageExtractor;
 use crate::services::importer::AppImageImporter;
 use crate::services::launcher::AppImageLauncher;
+use crate::services::updater::{AppImageUpdater, UpdateCheck};
 use crate::services::validator::AppImageValidator;
 use crate::ui::app_details::AppDetailsWidget;
 use crate::ui::app_list::AppListWidget;
@@ -22,8 +23,7 @@ use gtk4::gdk;
 use gtk4::gio::{self, SimpleAction};
 use gtk4::prelude::*;
 use gtk4::{
-    Box, Button, DropTarget, FileChooserAction, FileChooserNative, FileFilter, MenuButton,
-    Orientation, Paned, ResponseType, Stack,
+    Box, Button, DropTarget, FileDialog, FileFilter, MenuButton, Orientation, Paned, Stack,
 };
 use libadwaita::prelude::*;
 use libadwaita::{
@@ -46,6 +46,7 @@ struct ControllerState {
 }
 
 type RefreshHandle = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+type SharedCallback<T> = Rc<RefCell<Option<Rc<dyn Fn(T)>>>>;
 
 struct Snapshot {
     listing: AppImagesListing,
@@ -95,6 +96,12 @@ impl MainWindow {
             Arc::clone(&launcher),
         ));
         let update_cmd = Arc::new(UpdateAppImageCommand::new(Arc::clone(&repo), paths.clone()));
+        let replace_cmd = Arc::new(ReplaceAppImageCommand::new(
+            Arc::clone(&repo),
+            Arc::clone(&launcher),
+            paths.clone(),
+        ));
+        let updater = Arc::new(AppImageUpdater::new());
         let list_query = Arc::new(ListAppImagesQuery::new(Arc::clone(&repo)));
 
         let state = Rc::new(RefCell::new(ControllerState {
@@ -124,6 +131,7 @@ impl MainWindow {
             .icon_name("list-add-symbolic")
             .tooltip_text("Add AppImage (Ctrl+O)")
             .build();
+        add_btn.update_property(&[gtk4::accessible::Property::Label("Add AppImage")]);
         header_bar.pack_start(&add_btn);
 
         // Refresh button
@@ -131,6 +139,9 @@ impl MainWindow {
             .icon_name("view-refresh-symbolic")
             .tooltip_text("Refresh Application List (Ctrl+R)")
             .build();
+        refresh_btn.update_property(&[gtk4::accessible::Property::Label(
+            "Refresh application list",
+        )]);
         header_bar.pack_start(&refresh_btn);
 
         // Menu button
@@ -143,6 +154,7 @@ impl MainWindow {
         menu.append(Some("Preferences"), Some("win.preferences"));
         menu.append(Some("Open Applications Folder"), Some("win.open_folder"));
         menu.append(Some("About AppNest"), Some("win.about"));
+        menu_btn.update_property(&[gtk4::accessible::Property::Label("Main menu")]);
         menu_btn.set_menu_model(Some(&menu));
         header_bar.pack_end(&menu_btn);
 
@@ -238,6 +250,11 @@ impl MainWindow {
         });
         window.add_action(&about_action);
 
+        // Set once the import prompt exists; lets the discovery list start an import
+        let import_prompt_cell: SharedCallback<PathBuf> = Rc::new(RefCell::new(None));
+        // The disk is searched for new AppImages at startup and on Refresh, not on every update
+        let scan_flag = Rc::new(Cell::new(true));
+
         // Starts or stops an application on a worker thread (both can take a moment) and
         // reflects the result in the list and details views.
         let toggle_app_fn: Rc<dyn Fn(String, String)> = {
@@ -318,6 +335,7 @@ impl MainWindow {
             let is_updating = Rc::clone(&is_updating);
             let title_widget_clone = title_widget.clone();
             let toggle_app_fn = Rc::clone(&toggle_app_fn);
+            let import_prompt_cell = Rc::clone(&import_prompt_cell);
 
             Rc::new(move |snapshot: Snapshot| {
                 let Snapshot { listing, running } = snapshot;
@@ -375,6 +393,18 @@ impl MainWindow {
                 }
                 state.borrow_mut().row_widgets = row_map;
 
+                {
+                    let prompt = Rc::clone(&import_prompt_cell);
+                    app_list_widget.borrow().set_discovered(
+                        &listing.unmanaged_discovered,
+                        move |path| {
+                            let f = prompt.borrow().clone();
+                            if let Some(f) = f {
+                                f(path);
+                            }
+                        },
+                    );
+                }
                 app_list_widget
                     .borrow()
                     .set_empty_state(!filtered_apps.is_empty(), !query.is_empty());
@@ -419,11 +449,14 @@ impl MainWindow {
         let refresh_self: RefreshHandle = Rc::new(RefCell::new(None));
         let refresh_list_fn: Rc<dyn Fn()> = {
             let list_query = Arc::clone(&list_query);
+            let config_store = Arc::clone(&config_store);
             let launcher = Arc::clone(&launcher);
             let repo = Arc::clone(&repo);
             let paths = paths.clone();
             let render_fn = Rc::clone(&render_fn);
             let refresh_self = Rc::clone(&refresh_self);
+            let scan_flag = Rc::clone(&scan_flag);
+            let discovered_cache: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
             let in_flight = Rc::new(Cell::new(false));
             let pending = Rc::new(Cell::new(false));
             let icon_attempted: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -434,21 +467,53 @@ impl MainWindow {
                     return;
                 }
 
+                let rescan = scan_flag.replace(false);
                 let (tx, rx) = async_channel::unbounded::<Snapshot>();
                 {
                     let list_query = Arc::clone(&list_query);
+                    let config_store = Arc::clone(&config_store);
+                    let cache = Arc::clone(&discovered_cache);
                     let launcher = Arc::clone(&launcher);
                     let repo = Arc::clone(&repo);
                     let paths = paths.clone();
                     let attempted = Arc::clone(&icon_attempted);
 
                     std::thread::spawn(move || {
-                        // Discovery of unmanaged AppImages is not shown in the UI, so the
-                        // refresh does not scan the disk for them.
-                        let listing = list_query.execute(&[]).unwrap_or(AppImagesListing {
-                            managed: Vec::new(),
-                            unmanaged_discovered: Vec::new(),
-                        });
+                        // Searches the scan folders only when asked to; otherwise the previous
+                        // results are reused, minus anything that has been added since.
+                        let gather = |scan: bool| {
+                            let empty = || AppImagesListing {
+                                managed: Vec::new(),
+                                unmanaged_discovered: Vec::new(),
+                            };
+                            if scan {
+                                let configured = config_store.load().scan_directories;
+                                let dirs = if configured.is_empty() {
+                                    paths.default_scan_directories()
+                                } else {
+                                    configured
+                                };
+                                let listing = list_query.execute(&dirs).unwrap_or_else(|_| empty());
+                                *cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    listing.unmanaged_discovered.clone();
+                                listing
+                            } else {
+                                let mut listing =
+                                    list_query.execute(&[]).unwrap_or_else(|_| empty());
+                                let known: HashSet<&PathBuf> =
+                                    listing.managed.iter().map(|a| &a.path).collect();
+                                let found: Vec<PathBuf> = cache
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .iter()
+                                    .filter(|p| !known.contains(p))
+                                    .cloned()
+                                    .collect();
+                                listing.unmanaged_discovered = found;
+                                listing
+                            }
+                        };
+                        let listing = gather(rescan);
                         let running = launcher.refresh_running(&listing.managed);
                         let managed = listing.managed.clone();
                         let _ = tx.send_blocking(Snapshot {
@@ -485,9 +550,8 @@ impl MainWindow {
                             }
                         }
                         if changed {
-                            if let Ok(listing) = list_query.execute(&[]) {
-                                let _ = tx.send_blocking(Snapshot { listing, running });
-                            }
+                            let listing = gather(false);
+                            let _ = tx.send_blocking(Snapshot { listing, running });
                         }
                     });
                 }
@@ -512,8 +576,16 @@ impl MainWindow {
         };
         *refresh_self.borrow_mut() = Some(Rc::clone(&refresh_list_fn));
 
-        // Connect Refresh Button
-        let r_fn = Rc::clone(&refresh_list_fn);
+        // Refresh (button, F5, Ctrl+R) also searches the scan folders again
+        let rescan_fn: Rc<dyn Fn()> = {
+            let scan_flag = Rc::clone(&scan_flag);
+            let refresh = Rc::clone(&refresh_list_fn);
+            Rc::new(move || {
+                scan_flag.set(true);
+                refresh();
+            })
+        };
+        let r_fn = Rc::clone(&rescan_fn);
         refresh_btn.connect_clicked(move |_| {
             r_fn();
         });
@@ -978,6 +1050,271 @@ impl MainWindow {
             });
         }
 
+        // Connect Details: Desktop Shortcut Switch (independent of the menu entry)
+        {
+            let state = Rc::clone(&state);
+            let update_cmd = Arc::clone(&update_cmd);
+            let toast_overlay = toast_overlay.clone();
+            let r_fn = Rc::clone(&refresh_list_fn);
+            let is_updating = Rc::clone(&is_updating);
+
+            app_details_widget
+                .borrow()
+                .shortcut_switch
+                .connect_active_notify(move |sw| {
+                    if is_updating.get() {
+                        return;
+                    }
+                    let Some(id) = state.borrow().selected_id.clone() else {
+                        return;
+                    };
+                    let active = sw.is_active();
+                    match update_cmd.set_desktop_shortcut(&id, active) {
+                        Ok(updated) => {
+                            let msg = if active {
+                                format!("Added a desktop shortcut for {}", updated.name)
+                            } else {
+                                format!("Removed the desktop shortcut for {}", updated.name)
+                            };
+                            toast_overlay.add_toast(Toast::new(&msg));
+                            r_fn();
+                        }
+                        Err(e) => {
+                            toast_overlay
+                                .add_toast(Toast::new(&format!("Desktop shortcut: {}", e)));
+                            is_updating.set(true);
+                            sw.set_active(!active);
+                            is_updating.set(false);
+                        }
+                    }
+                });
+        }
+
+        // Replaces an application's AppImage with another file, on a worker thread
+        let replace_fn: Rc<dyn Fn(String, PathBuf, bool)> = {
+            let replace_cmd = Arc::clone(&replace_cmd);
+            let toast_overlay = toast_overlay.clone();
+            let r_fn = Rc::clone(&refresh_list_fn);
+
+            Rc::new(move |id: String, path: PathBuf, delete_after: bool| {
+                let (tx, rx) = async_channel::bounded(1);
+                {
+                    let replace_cmd = Arc::clone(&replace_cmd);
+                    std::thread::spawn(move || {
+                        let res = replace_cmd.execute(&id, &path);
+                        if delete_after {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                        let _ = tx.send_blocking(res);
+                    });
+                }
+                let toast_overlay = toast_overlay.clone();
+                let r_fn = Rc::clone(&r_fn);
+                glib::spawn_future_local(async move {
+                    match rx.recv().await {
+                        Ok(Ok(app)) => {
+                            toast_overlay.add_toast(Toast::new(&format!(
+                                "Updated {}{}",
+                                app.name,
+                                app.version
+                                    .as_ref()
+                                    .map(|v| format!(" to {}", v))
+                                    .unwrap_or_default()
+                            )));
+                            r_fn();
+                        }
+                        Ok(Err(e)) => {
+                            toast_overlay
+                                .add_toast(Toast::new(&format!("Could not replace: {}", e)));
+                        }
+                        Err(_) => {}
+                    }
+                });
+            })
+        };
+
+        // Connect Details: Replace with a newer AppImage file
+        {
+            let state = Rc::clone(&state);
+            let window_clone = window.clone();
+            let replace_fn = Rc::clone(&replace_fn);
+
+            app_details_widget
+                .borrow()
+                .replace_btn
+                .connect_clicked(move |_| {
+                    let Some(id) = state.borrow().selected_id.clone() else {
+                        return;
+                    };
+                    let filter = FileFilter::new();
+                    filter.set_name(Some("AppImage Executables"));
+                    filter.add_pattern("*.AppImage");
+                    filter.add_pattern("*.appimage");
+                    let chooser = FileDialog::builder()
+                        .title("Choose the Newer AppImage")
+                        .default_filter(&filter)
+                        .build();
+
+                    let replace_fn = Rc::clone(&replace_fn);
+                    chooser.open(
+                        Some(&window_clone),
+                        None::<&gio::Cancellable>,
+                        move |result| {
+                            if let Some(path) = result.ok().and_then(|f| f.path()) {
+                                replace_fn(id.clone(), path, false);
+                            }
+                        },
+                    );
+                });
+        }
+
+        // Connect Details: Check for Updates (and download + install after confirmation)
+        {
+            let state = Rc::clone(&state);
+            let updater = Arc::clone(&updater);
+            let window_clone = window.clone();
+            let toast_overlay = toast_overlay.clone();
+            let replace_fn = Rc::clone(&replace_fn);
+            let updates_dir = paths.cache_dir.join("updates");
+            let update_row = app_details_widget.borrow().update_row.clone();
+
+            app_details_widget
+                .borrow()
+                .check_update_btn
+                .connect_clicked(move |btn| {
+                    let selected = {
+                        let st = state.borrow();
+                        st.selected_id
+                            .as_ref()
+                            .and_then(|id| st.apps.iter().find(|a| &a.id == id).cloned())
+                    };
+                    let Some(app) = selected else { return };
+
+                    btn.set_sensitive(false);
+                    update_row.set_subtitle("Checking for updates...");
+
+                    let (tx, rx) = async_channel::bounded(1);
+                    {
+                        let updater = Arc::clone(&updater);
+                        let path = app.path.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send_blocking(updater.check(&path));
+                        });
+                    }
+
+                    let btn = btn.clone();
+                    let update_row = update_row.clone();
+                    let toast_overlay = toast_overlay.clone();
+                    let window_clone = window_clone.clone();
+                    let replace_fn = Rc::clone(&replace_fn);
+                    let updater = Arc::clone(&updater);
+                    let updates_dir = updates_dir.clone();
+                    glib::spawn_future_local(async move {
+                        let Ok(result) = rx.recv().await else { return };
+                        btn.set_sensitive(true);
+                        let status = match &result {
+                            Ok(UpdateCheck::NoUpdateInformation) => {
+                                "This AppImage has no update information. Use \"Replace\" with a newer file.".to_string()
+                            }
+                            Ok(UpdateCheck::Unsupported(kind)) => {
+                                format!("Unsupported update method: {}", kind)
+                            }
+                            Ok(UpdateCheck::UpToDate) => "Already up to date".to_string(),
+                            Ok(UpdateCheck::Available(u)) => {
+                                format!("Update available: {}", u.filename)
+                            }
+                            Err(e) => format!("Update check failed: {}", e),
+                        };
+                        update_row.set_subtitle(&status);
+
+                        let Ok(UpdateCheck::Available(update)) = result else {
+                            toast_overlay.add_toast(Toast::new(&status));
+                            return;
+                        };
+
+                        let size = if update.length > 0 {
+                            format!(" ({:.1} MB)", update.length as f64 / 1_048_576.0)
+                        } else {
+                            String::new()
+                        };
+                        let dialog = AlertDialog::builder()
+                            .heading(format!("Update available for {}", app.name))
+                            .body(format!(
+                                "{}{}{}\n\nIt will be downloaded over HTTPS and checked against the \
+                                 checksum published in the update information before it replaces \
+                                 the current version.",
+                                if update.filename.is_empty() { "A new version" } else { &update.filename },
+                                update.release.as_ref().map(|r| format!(", release {}", r)).unwrap_or_default(),
+                                size
+                            ))
+                            .build();
+                        dialog.add_response("cancel", "Not Now");
+                        dialog.add_response("install", "Download and Install");
+                        dialog.set_response_appearance("install", libadwaita::ResponseAppearance::Suggested);
+                        dialog.set_default_response(Some("install"));
+                        dialog.set_close_response("cancel");
+
+                        let app_id = app.id.clone();
+                        dialog.choose(Some(&window_clone), None::<&gio::Cancellable>, move |response| {
+                            if response != "install" {
+                                return;
+                            }
+                            btn.set_sensitive(false);
+                            update_row.set_subtitle("Downloading...");
+
+                            let (tx, rx) = async_channel::unbounded();
+                            {
+                                let updater = Arc::clone(&updater);
+                                let updates_dir = updates_dir.clone();
+                                let update = update.clone();
+                                std::thread::spawn(move || {
+                                    let cancel = std::sync::atomic::AtomicBool::new(false);
+                                    let dest = match AppImageUpdater::new_download_path(&updates_dir) {
+                                        Ok(d) => d,
+                                        Err(e) => {
+                                            let _ = tx.send_blocking((0, 0, Some(Err(e.into()))));
+                                            return;
+                                        }
+                                    };
+                                    let res = updater.download(
+                                        &update,
+                                        &dest,
+                                        &mut |done, total| {
+                                            let _ = tx.send_blocking((done, total, None));
+                                        },
+                                        &cancel,
+                                    );
+                                    let _ = tx.send_blocking((0, 0, Some(res.map(|_| dest))));
+                                });
+                            }
+
+                            let replace_fn = Rc::clone(&replace_fn);
+                            let toast_overlay = toast_overlay.clone();
+                            let app_id = app_id.clone();
+                            let (btn, update_row) = (btn.clone(), update_row.clone());
+                            glib::spawn_future_local(async move {
+                                while let Ok((done, total, finished)) = rx.recv().await {
+                                    match finished {
+                                        None if total > 0 => update_row
+                                            .set_subtitle(&format!("Downloading... {}%", done * 100 / total)),
+                                        None => update_row.set_subtitle("Downloading..."),
+                                        Some(Ok(path)) => {
+                                            update_row.set_subtitle("Installing...");
+                                            replace_fn(app_id.clone(), path, true);
+                                        }
+                                        Some(Err(e)) => {
+                                            update_row.set_subtitle(&format!("Update failed: {}", e));
+                                            toast_overlay.add_toast(Toast::new(&format!("Update failed: {}", e)));
+                                        }
+                                    }
+                                }
+                                btn.set_sensitive(true);
+                            });
+                        });
+                    });
+                });
+        }
+
         // Define integration prompt closures
         let prompt_open_fn = {
             let window_clone = window.clone();
@@ -1115,8 +1452,6 @@ impl MainWindow {
                 let import_cmd_dlg = Arc::clone(&import_cmd);
                 let launcher_dlg = Arc::clone(&launcher);
                 let config_store_dlg = Arc::clone(&config_store);
-                let repo_dlg = Arc::clone(&repo);
-                let paths_dlg = paths.clone();
                 let r_fn_dlg = Rc::clone(&r_fn);
                 let state_dlg = Rc::clone(&state);
                 let path_dlg = path.clone();
@@ -1139,6 +1474,7 @@ impl MainWindow {
                             std::thread::spawn(move || {
                                 let mut settings = config_store.load();
                                 settings.auto_integrate_desktop = create_shortcut;
+                                settings.auto_desktop_shortcut = create_shortcut;
                                 let res = import_cmd.execute(&p, &settings);
                                 let _ = tx.send_blocking(res);
                             });
@@ -1146,34 +1482,12 @@ impl MainWindow {
                             let toast_res = toast_dlg.clone();
                             let r_fn_res = Rc::clone(&r_fn_dlg);
                             let state_res = Rc::clone(&state_dlg);
-                            let repo_res = Arc::clone(&repo_dlg);
-                            let paths_res = paths_dlg.clone();
                             let name_res = app_name_dlg.clone();
 
                             glib::spawn_future_local(async move {
                                 if let Ok(res) = rx.recv().await {
                                     match res {
-                                        Ok(mut app) => {
-                                            if create_shortcut {
-                                                if !app.desktop_integrated {
-                                                    if let Ok(entry_path) =
-                                                        DesktopEntryService::create_entry(
-                                                            &app,
-                                                            &paths_res.desktop_applications_dir,
-                                                        )
-                                                    {
-                                                        app.desktop_integrated = true;
-                                                        app.desktop_entry_path = Some(entry_path);
-                                                        let _ = repo_res.save(&app);
-                                                    }
-                                                }
-                                                let _ =
-                                                    DesktopEntryService::create_user_desktop_shortcut(
-                                                        &app,
-                                                        paths_res.user_desktop_dir.as_deref(),
-                                                    );
-                                            }
-
+                                        Ok(app) => {
                                             // Auto-select the newly added app (no auto-launch)
                                             state_res.borrow_mut().selected_id =
                                                 Some(app.id.clone());
@@ -1238,7 +1552,6 @@ impl MainWindow {
             let import_cmd = Arc::clone(&import_cmd);
             let config_store = Arc::clone(&config_store);
             let repo = Arc::clone(&repo);
-            let paths = paths.clone();
             let r_fn = Rc::clone(&refresh_list_fn);
             let state = Rc::clone(&state);
 
@@ -1302,8 +1615,6 @@ impl MainWindow {
                 let toast_dlg = toast_overlay.clone();
                 let import_cmd_dlg = Arc::clone(&import_cmd);
                 let config_store_dlg = Arc::clone(&config_store);
-                let repo_dlg = Arc::clone(&repo);
-                let paths_dlg = paths.clone();
                 let r_fn_dlg = Rc::clone(&r_fn);
                 let state_dlg = Rc::clone(&state);
                 let path_dlg = path.clone();
@@ -1326,6 +1637,7 @@ impl MainWindow {
                             std::thread::spawn(move || {
                                 let mut settings = config_store.load();
                                 settings.auto_integrate_desktop = create_shortcut;
+                                settings.auto_desktop_shortcut = create_shortcut;
                                 let res = import_cmd.execute(&p, &settings);
                                 let _ = tx.send_blocking(res);
                             });
@@ -1333,33 +1645,12 @@ impl MainWindow {
                             let toast_res = toast_dlg.clone();
                             let r_fn_res = Rc::clone(&r_fn_dlg);
                             let state_res = Rc::clone(&state_dlg);
-                            let repo_res = Arc::clone(&repo_dlg);
-                            let paths_res = paths_dlg.clone();
                             let name_res = app_name_dlg.clone();
 
                             glib::spawn_future_local(async move {
                                 if let Ok(res) = rx.recv().await {
                                     match res {
-                                        Ok(mut app) => {
-                                            if create_shortcut {
-                                                if !app.desktop_integrated {
-                                                    if let Ok(entry_path) =
-                                                        DesktopEntryService::create_entry(
-                                                            &app,
-                                                            &paths_res.desktop_applications_dir,
-                                                        )
-                                                    {
-                                                        app.desktop_integrated = true;
-                                                        app.desktop_entry_path = Some(entry_path);
-                                                        let _ = repo_res.save(&app);
-                                                    }
-                                                }
-                                                let _ = DesktopEntryService::create_user_desktop_shortcut(
-                                                    &app,
-                                                    paths_res.user_desktop_dir.as_deref(),
-                                                );
-                                            }
-
+                                        Ok(app) => {
                                             state_res.borrow_mut().selected_id =
                                                 Some(app.id.clone());
                                             r_fn_res();
@@ -1387,13 +1678,14 @@ impl MainWindow {
             })
         };
 
+        *import_prompt_cell.borrow_mut() =
+            Some(Rc::clone(&prompt_import_fn) as Rc<dyn Fn(PathBuf)>);
+
         let prompt_import_multiple_fn = {
             let window_clone = window.clone();
             let toast_overlay = toast_overlay.clone();
             let import_cmd = Arc::clone(&import_cmd);
             let config_store = Arc::clone(&config_store);
-            let repo = Arc::clone(&repo);
-            let paths = paths.clone();
             let r_fn = Rc::clone(&refresh_list_fn);
             let state = Rc::clone(&state);
 
@@ -1418,8 +1710,6 @@ impl MainWindow {
                 let toast_dlg = toast_overlay.clone();
                 let import_cmd_dlg = Arc::clone(&import_cmd);
                 let config_store_dlg = Arc::clone(&config_store);
-                let repo_dlg = Arc::clone(&repo);
-                let paths_dlg = paths.clone();
                 let r_fn_dlg = Rc::clone(&r_fn);
                 let state_dlg = Rc::clone(&state);
 
@@ -1439,6 +1729,7 @@ impl MainWindow {
                             std::thread::spawn(move || {
                                 let mut settings = config_store.load();
                                 settings.auto_integrate_desktop = create_shortcuts;
+                                settings.auto_desktop_shortcut = create_shortcuts;
                                 let mut imported = Vec::new();
                                 let mut errors = Vec::new();
 
@@ -1458,27 +1749,10 @@ impl MainWindow {
                             let toast_res = toast_dlg.clone();
                             let r_fn_res = Rc::clone(&r_fn_dlg);
                             let state_res = Rc::clone(&state_dlg);
-                            let repo_res = Arc::clone(&repo_dlg);
-                            let paths_res = paths_dlg.clone();
 
                             glib::spawn_future_local(async move {
-                                if let Ok((mut imported, errors)) = rx.recv().await {
+                                if let Ok((imported, errors)) = rx.recv().await {
                                     if !imported.is_empty() {
-                                        if create_shortcuts {
-                                            for app in &mut imported {
-                                                if !app.desktop_integrated {
-                                                    if let Ok(entry_path) = DesktopEntryService::create_entry(
-                                                        app,
-                                                        &paths_res.desktop_applications_dir,
-                                                    ) {
-                                                        app.desktop_integrated = true;
-                                                        app.desktop_entry_path = Some(entry_path);
-                                                        let _ = repo_res.save(app);
-                                                    }
-                                                }
-                                            }
-                                        }
-
                                         if let Some(last) = imported.last() {
                                             state_res.borrow_mut().selected_id = Some(last.id.clone());
                                         }
@@ -1512,32 +1786,25 @@ impl MainWindow {
             let prompt_import = Rc::clone(&prompt_import_fn);
 
             Rc::new(move || {
-                let chooser = FileChooserNative::builder()
-                    .title("Select an AppImage")
-                    .action(FileChooserAction::Open)
-                    .transient_for(&window_clone)
-                    .build();
-
                 let filter = FileFilter::new();
                 filter.set_name(Some("AppImage Executables"));
                 filter.add_pattern("*.AppImage");
                 filter.add_pattern("*.appimage");
-                chooser.add_filter(&filter);
+                let chooser = FileDialog::builder()
+                    .title("Select an AppImage")
+                    .default_filter(&filter)
+                    .build();
 
                 let prompt_import_c = Rc::clone(&prompt_import);
-
-                chooser.connect_response(move |dialog, response| {
-                    if response == ResponseType::Accept {
-                        if let Some(file) = dialog.file() {
-                            if let Some(path) = file.path() {
-                                prompt_import_c(path);
-                            }
+                chooser.open(
+                    Some(&window_clone),
+                    None::<&gio::Cancellable>,
+                    move |result| {
+                        if let Some(path) = result.ok().and_then(|f| f.path()) {
+                            prompt_import_c(path);
                         }
-                    }
-                    dialog.destroy();
-                });
-
-                chooser.show();
+                    },
+                );
             })
         };
 
@@ -1566,7 +1833,7 @@ impl MainWindow {
 
         // win.refresh
         let refresh_action = SimpleAction::new("refresh", None);
-        let r_fn_act = Rc::clone(&refresh_list_fn);
+        let r_fn_act = Rc::clone(&rescan_fn);
         refresh_action.connect_activate(move |_, _| {
             r_fn_act();
         });

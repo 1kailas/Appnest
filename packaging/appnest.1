@@ -1,30 +1,87 @@
-.TH APPNEST 1 "" "appnest" "User Commands"
+.TH APPNEST 1 "" "appnest 0.4.0" "User Commands"
 .SH NAME
 appnest \- manage, integrate, and launch AppImages
 .SH SYNOPSIS
 .B appnest
-[\fIOPTION\fR...] [\fIFILE\fR...]
+[\fIFILE\fR...]
+.br
+.B appnest
+\fICOMMAND\fR [\fIOPTIONS\fR] [\fIARGS\fR...]
 .SH DESCRIPTION
 .B appnest
-is a graphical manager for AppImage files. It imports AppImages into a library,
-creates application menu entries and icons for them, launches and stops them,
-and can calculate their SHA-256 hashes.
+manages AppImage files: it imports them into a library, creates application
+menu entries, desktop shortcuts and icons for them, launches and stops them,
+discovers AppImages that are not managed yet, checks for updates published
+inside the AppImages, and can calculate their SHA-256 hashes.
 .PP
-If one or more AppImage files are given on the command line, AppNest opens its
-window and offers to add or run each of them. Only one instance runs at a time;
-files passed to a second invocation are handled by the running instance.
-.SH OPTIONS
-.PP
-AppNest accepts the standard GTK and GApplication options. It does not provide a command-line interface for managing AppImages.
+Started without a command, or with file names, AppNest opens its window and
+offers to add or run each file. Only one instance runs at a time; files passed
+to a second invocation are handled by the running instance.
+.SH COMMANDS
+All commands work without a display. \fIID\fR is an application identifier as
+shown by \fBappnest list\fR.
 .TP
-.BR \-h ", " \-\-help
-Show the available options and exit.
+.B list
+List the applications and whether each one is ready, running, or missing its file.
 .TP
-.B \-\-help\-all
-Show all options, including those of GTK.
+.BI "info " ID
+Show details of an application: path, size, type, launch method, integration
+state, checksum and update information.
 .TP
-.B \-\-help\-gapplication
-Show the GApplication options.
+.BI "import " [\fIOPTIONS\fR] \fIFILE\fR...
+Add AppImages to the library.
+.RS
+.TP
+.B \-\-no\-copy
+Reference the file where it is instead of copying it into the library.
+.TP
+.B \-\-no\-menu
+Do not create an application menu entry.
+.TP
+.B \-\-no\-shortcut
+Do not create a desktop shortcut.
+.RE
+.TP
+.BI "launch " ID " [\fB\-\-\fR \fIARGS\fR...]"
+Start an application, passing any arguments after \fB\-\-\fR to it.
+.TP
+.BI "run " FILE " [\fB\-\-\fR \fIARGS\fR...]"
+Run an AppImage once without adding it to the library.
+.TP
+.BI "remove " [\fIOPTIONS\fR] \fIID\fR
+Remove an application. Asks for confirmation in a terminal.
+.RS
+.TP
+.B \-\-delete\-file
+Also delete the copied AppImage file.
+.TP
+.BR \-y ", " \-\-yes
+Do not ask for confirmation.
+.RE
+.TP
+.BI "scan " [\fIDIR\fR...]
+List AppImages in the scan folders that are not in the library yet. Without
+arguments, the configured scan folders are used.
+.TP
+.BI "check-update " ID
+Check the update information the publisher embedded in the AppImage.
+.TP
+.BI "update " [\fB\-y\fR] \fIID\fR
+Check for an update, then download and install it. Downloads use HTTPS and are
+verified against the checksum published in the update information before they
+replace the current version.
+.TP
+.BI "replace " ID " " FILE
+Replace the AppImage behind an application with a newer file, keeping its
+identity, launch method and integration settings.
+.TP
+.BR \-h ", " \-\-help ", " help
+Show usage.
+.TP
+.BR \-V ", " \-\-version ", " version
+Show the version.
+.SH "EXIT STATUS"
+0 on success, 1 on failure, 2 for usage errors.
 .SH FILES
 .TP
 .I $XDG_DATA_HOME/appnest/
@@ -32,10 +89,19 @@ Managed AppImages, extracted AppDirs, icons and the application database
 (default: \fI~/.local/share/appnest/\fR).
 .TP
 .I $XDG_CONFIG_HOME/appnest/config.toml
-User settings (default: \fI~/.config/appnest/config.toml\fR).
+User settings, including the scan folders (default: \fI~/.config/appnest/config.toml\fR).
 .TP
 .I $XDG_DATA_HOME/applications/
 Desktop entries generated for integrated AppImages (named appnest-<id>.desktop).
+These entries launch through \fBappnest launch\fR so that failure detection and
+the runtime fallbacks apply everywhere.
 .TP
 .I $XDG_CACHE_HOME/appnest/launch-<id>.log
 Standard error output of the most recent launch of an application.
+.TP
+.I $XDG_CACHE_HOME/appnest/updates/
+Temporary location of downloaded updates.
+.SH NOTES
+Updating downloads the complete new AppImage; the zsync delta-transfer method
+is not implemented. Embedded AppImage signatures (.sig_key sections) are not
+verified.

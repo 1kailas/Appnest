@@ -1,0 +1,10 @@
+appnest (0.4.0-1) unstable; urgency=medium
+
+  * Initial Debian packaging.
+    - Update checks and downloads using the AppImage update information (zsync)
+    - Command-line interface: list, info, import, launch, run, remove, scan,
+      check-update, update, replace
+    - Discovery of unmanaged AppImages in configurable scan folders
+    - Independent application menu entries and desktop shortcuts
+
+ -- Kailasnath T <00kailas000@gmail.com>  Wed, 25 Nov 2026 12:00:00 +0000

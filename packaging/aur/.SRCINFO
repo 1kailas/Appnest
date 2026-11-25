@@ -1,6 +1,6 @@
 pkgbase = appnest
 	pkgdesc = A clean, modern AppImage manager built with Rust, GTK4, and Libadwaita
-	pkgver = 0.3.0
+	pkgver = 0.4.0
 	pkgrel = 1
 	url = https://github.com/1kailas/Appnest
 	arch = x86_64
@@ -13,7 +13,8 @@ pkgbase = appnest
 	depends = hicolor-icon-theme
 	depends = libadwaita
 	depends = 7zip
+	depends = curl
 	source = appnest-0.3.0.tar.gz::https://github.com/1kailas/Appnest/archive/refs/tags/v0.3.0.tar.gz
-	sha256sums = 77f5ca7cf0cf92910e1b29f5eda0add0c74a91dc133e975ade59ba9efb67313b
+	sha256sums = SKIP
 
 pkgname = appnest

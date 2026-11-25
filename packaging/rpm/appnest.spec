@@ -1,7 +1,7 @@
 %global app_id io.github._1kailas.AppNest
 
 Name:           appnest
-Version:        0.3.0
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Manage, integrate, and launch AppImages
 
@@ -28,19 +28,22 @@ Source:         %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 ExclusiveArch:  %{rust_arches}
 
 BuildRequires:  cargo-rpm-macros >= 24
-BuildRequires:  pkgconfig(gtk4) >= 4.6
+BuildRequires:  pkgconfig(gtk4) >= 4.10
 BuildRequires:  pkgconfig(libadwaita-1) >= 1.5
 BuildRequires:  desktop-file-utils
 BuildRequires:  libappstream-glib
 
 Requires:       hicolor-icon-theme
 Requires:       /usr/bin/7z
+Requires:       curl
 Recommends:     desktop-file-utils
 
 %description
 AppNest is a desktop application for managing, organizing, integrating, and
 launching AppImages. It imports AppImages into a managed library, creates
-desktop entries and icons for them, and can verify their SHA-256 hashes.
+desktop entries and icons for them, discovers AppImages that are not managed
+yet, checks for updates published inside the AppImages, and can verify their
+SHA-256 hashes. Every feature is also available on the command line.
 
 An adaptive runtime (direct execution, extract-and-run, or running the
 extracted AppRun) lets AppImages start even when FUSE is unavailable.
@@ -79,5 +82,16 @@ appstream-util validate-relax --nonet %{buildroot}%{_metainfodir}/%{app_id}.meta
 %{_metainfodir}/%{app_id}.metainfo.xml
 
 %changelog
+* Wed Nov 25 2026 Kailasnath T <00kailas000@gmail.com> - 0.4.0-1
+- Update checks and downloads using the AppImage update information (zsync)
+- Command-line interface: list, info, import, launch, run, remove, scan,
+  check-update, update, replace
+- Discovery: unmanaged AppImages found in configurable scan folders are
+  shown in the window
+- Menu entries and desktop shortcuts are now independent per application
+- Menu entries launch through `appnest launch` so all entry points share
+  failure detection and runtime fallbacks
+- Replace an application with a newer AppImage file
+
 * Wed Nov 25 2026 Kailasnath T <00kailas000@gmail.com> - 0.3.0-1
 - Initial package for Fedora

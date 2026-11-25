@@ -27,6 +27,10 @@ pub struct AppDetailsWidget {
     pub hash_row: ActionRow,
     pub runtime_combo: ComboRow,
     pub desktop_switch: SwitchRow,
+    pub shortcut_switch: SwitchRow,
+    pub update_row: ActionRow,
+    pub check_update_btn: Button,
+    pub replace_btn: Button,
     pub copy_path_btn: Button,
     pub compute_hash_btn: Button,
     pub copy_hash_btn: Button,
@@ -233,10 +237,16 @@ impl AppDetailsWidget {
 
         // Desktop integration switch
         let desktop_switch = SwitchRow::builder()
-            .title("Desktop Integration")
-            .subtitle("Create desktop shortcut and menu launcher")
+            .title("Application Menu Entry")
+            .subtitle("Show this application in the system's application menu")
             .build();
         exec_group.add(&desktop_switch);
+
+        let shortcut_switch = SwitchRow::builder()
+            .title("Desktop Shortcut")
+            .subtitle("Place a launcher on your desktop")
+            .build();
+        exec_group.add(&shortcut_switch);
 
         // AppDir extraction row
         let extract_row = ActionRow::builder()
@@ -262,6 +272,41 @@ impl AppDetailsWidget {
         exec_group.add(&cmd_preview_row);
 
         root_box.append(&exec_group);
+
+        // Group: Updates
+        let update_group = PreferencesGroup::builder()
+            .title("Updates")
+            .margin_top(12)
+            .build();
+
+        let update_row = ActionRow::builder()
+            .title("Check for Updates")
+            .subtitle("Uses the update information published inside the AppImage")
+            .subtitle_lines(3)
+            .build();
+        let check_update_btn = Button::builder()
+            .label("Check")
+            .valign(Align::Center)
+            .build();
+        check_update_btn.add_css_class("pill");
+        update_row.add_suffix(&check_update_btn);
+        update_group.add(&update_row);
+
+        let replace_row = ActionRow::builder()
+            .title("Replace with a Newer AppImage")
+            .subtitle("Choose a downloaded file; the application keeps its settings")
+            .subtitle_lines(2)
+            .build();
+        let replace_btn = Button::builder()
+            .label("Choose File")
+            .icon_name("document-open-symbolic")
+            .valign(Align::Center)
+            .build();
+        replace_btn.add_css_class("pill");
+        replace_row.add_suffix(&replace_btn);
+        update_group.add(&replace_row);
+
+        root_box.append(&update_group);
 
         // Group 3: Integrity & Security
         let sec_group = PreferencesGroup::builder()
@@ -328,6 +373,10 @@ impl AppDetailsWidget {
             hash_row,
             runtime_combo,
             desktop_switch,
+            shortcut_switch,
+            update_row,
+            check_update_btn,
+            replace_btn,
             copy_path_btn,
             compute_hash_btn,
             copy_hash_btn,
@@ -439,6 +488,11 @@ impl AppDetailsWidget {
 
         // Update Switch
         self.desktop_switch.set_active(app.desktop_integrated);
+        self.shortcut_switch.set_active(app.desktop_shortcut);
+        self.replace_btn.set_sensitive(true);
+        self.check_update_btn.set_sensitive(app.exists());
+        self.update_row
+            .set_subtitle("Uses the update information published inside the AppImage");
 
         // Update Extract button text
         if app.is_extracted() {

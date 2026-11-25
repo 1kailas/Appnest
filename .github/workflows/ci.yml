@@ -92,3 +92,30 @@ jobs:
 
       - name: rpmlint
         run: rpmlint "${HOME}"/rpmbuild/SPECS/appnest.spec "${HOME}"/rpmbuild/SRPMS/appnest-*.src.rpm "${HOME}"/rpmbuild/RPMS/*/appnest-[0-9]*.rpm
+
+  debian-package:
+    name: Debian package build (offline, system crates)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:sid
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install build dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends             debhelper dh-cargo rustc cargo pkg-config dpkg-dev build-essential             desktop-file-utils libgtk-4-dev libadwaita-1-dev curl 7zip squashfs-tools             librust-gtk4-dev librust-libadwaita-dev librust-gio-dev librust-glib-dev             librust-serde-dev librust-toml-dev librust-thiserror-dev             librust-directories-dev librust-walkdir-dev librust-tempfile-dev             librust-chrono-dev librust-async-channel-dev librust-libc-dev             librust-sha2-dev librust-sha1-dev librust-serde-json-dev
+
+      - name: Build the package
+        run: |
+          mkdir /tmp/out
+          VERSION=$(dpkg-parsechangelog -S Version | sed 's/-[^-]*$//')
+          tar --exclude=.git --exclude=debian --transform "s,^,Appnest-$VERSION/,"             -czf "/tmp/out/appnest_${VERSION}.orig.tar.gz" .
+          cp "/tmp/out/appnest_${VERSION}.orig.tar.gz" ../
+          dpkg-buildpackage -us -uc -b
+          cp ../*.deb /tmp/out/
+          echo "built:" && ls /tmp/out

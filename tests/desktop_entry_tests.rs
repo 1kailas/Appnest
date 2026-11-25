@@ -53,31 +53,40 @@ fn newlines_in_metadata_cannot_inject_keys() {
     assert!(content.lines().all(|l| l.is_empty()
         || l.starts_with('[')
         || l.contains('=') && !l.starts_with("Exec=evil") && !l.starts_with("Exec=/bin/false")));
-    assert!(execs[0].contains(&a.path.to_string_lossy().to_string()));
+    assert!(execs[0].starts_with("Exec=appnest launch "), "{}", execs[0]);
 }
 
 #[test]
-fn exec_line_quotes_special_characters() {
+fn exec_launches_through_appnest_with_a_quoted_id() {
     let env = TestEnv::new();
-    let mut a = app(&env, "quoted", "Quoted");
-    a.path = std::path::PathBuf::from("/tmp/a b\"c$d\\e%f`g/app.AppImage");
-
+    let a = app(&env, "plain-id", "Plain");
     let content = DesktopEntryService::generate_entry_content(&a);
+    assert!(
+        content.contains("Exec=appnest launch \"plain-id\" -- %U\n"),
+        "{}",
+        content
+    );
+
+    // Even an id that should never occur is quoted, not interpreted
+    let mut odd = app(&env, "x", "Odd");
+    odd.id = "a\"b$c%d`e\\f".to_string();
+    let content = DesktopEntryService::generate_entry_content(&odd);
     // Quoting (spec: Exec) first, then the string-value escaping that doubles backslashes
     assert!(
-        content.contains(r#"Exec="/tmp/a b\\"c\\$d\\\\e%%f\\`g/app.AppImage" %U"#),
+        content.contains(r#"Exec=appnest launch "a\\"b\\$c%%d\\`e\\\\f" -- %U"#),
         "{}",
         content
     );
 }
 
 #[test]
-fn extract_and_run_flag_is_added_without_a_shell() {
+fn the_runtime_method_is_not_baked_into_the_entry() {
     let env = TestEnv::new();
     let mut a = app(&env, "ear", "Ear");
     a.runtime_method = RuntimeMethod::ExtractAndRun;
     let content = DesktopEntryService::generate_entry_content(&a);
-    assert!(content.contains("--appimage-extract-and-run %U"));
+    assert!(!content.contains("--appimage-extract-and-run"));
+    assert!(content.contains("appnest launch"));
 }
 
 #[test]

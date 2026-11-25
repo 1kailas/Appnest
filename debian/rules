@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+
+include /usr/share/dpkg/architecture.mk
+include /usr/share/dpkg/buildflags.mk
+include /usr/share/rustc/architecture.mk
+export CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+export DEB_HOST_RUST_TYPE DEB_HOST_GNU_TYPE
+
+%:
+	dh $@ --buildsystem cargo
+
+# dh-cargo builds and installs the binary itself (cargo install into
+# debian/appnest/usr/bin). The data files are added afterwards.
+# Run the test suite as part of the build
+override_dh_auto_test:
+	dh_auto_test -- test
+
+execute_after_dh_auto_install:
+	install -Dm0644 packaging/io.github._1kailas.AppNest.desktop debian/appnest/usr/share/applications/io.github._1kailas.AppNest.desktop
+	install -Dm0644 resources/icons/io.github._1kailas.AppNest.svg debian/appnest/usr/share/icons/hicolor/scalable/apps/io.github._1kailas.AppNest.svg
+	install -Dm0644 resources/io.github._1kailas.AppNest.metainfo.xml debian/appnest/usr/share/metainfo/io.github._1kailas.AppNest.metainfo.xml
+	install -Dm0644 packaging/appnest.1 debian/appnest/usr/share/man/man1/appnest.1

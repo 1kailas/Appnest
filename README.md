@@ -8,7 +8,10 @@ A native Linux desktop application for managing, integrating and launching AppIm
 
 * **Import** AppImages with the file picker, by drag and drop (several at once), or by opening them from a file manager. Files are either copied into AppNest's library or referenced where they are.
 * **Validation**: every file is checked before use (ELF header, supported architecture, AppImage signature and embedded filesystem). A file is never accepted just because of its name.
-* **Desktop integration**: a menu entry (`appnest-<id>.desktop`) and, if a desktop folder exists, a desktop shortcut, with the icon extracted from the AppImage.
+* **Desktop integration**: an application menu entry and, independently, a desktop shortcut, each controlled per application and by preferences. Menu entries launch through `appnest launch`, so failure detection and the launch fallbacks apply however an application is started.
+* **Discovery**: AppImages found in the scan folders but not in the library are listed under "Found on this computer" with an Add button. The folders are configurable in Preferences; Refresh (`Ctrl+R`/`F5`) searches again.
+* **Updates**: checks the update information publishers embed in AppImages (`gh-releases-zsync` and `zsync`). Downloads use HTTPS, are checked against the SHA-1 in the zsync control file, and replace the current version while keeping the application's identity and settings. An application can also be replaced manually with any newer file.
+* **Command line**: everything is also available without a display: `appnest list`, `info`, `import`, `launch`, `run`, `remove`, `scan`, `check-update`, `update` and `replace`. See `appnest --help` and `man appnest`.
 * **Launch, close and Run Once** from the window. Running applications are detected, including ones started outside AppNest.
 * **Adaptive launching**: see [Launch methods](#launch-methods).
 * **SHA-256**: compute and copy the checksum of an AppImage. The stored value is discarded automatically when the file changes.
@@ -36,30 +39,31 @@ What AppNest does to limit the risk of *managing* them:
 * Names taken from an AppImage are never used as file names. Desktop entries are escaped according to the Desktop Entry Specification, namespaced, and never overwrite files AppNest did not create.
 * AppNest never disables an application's sandbox (for example it does not add `--no-sandbox`).
 * The library database is written atomically, under a lock, keeps a backup, and a damaged file is set aside rather than deleted.
-* AppNest does not touch your default-application settings, does not use the network, and sends no telemetry.
+* AppNest does not touch your default-application settings. The only network use is update checking and downloading, started by you, over HTTPS through the system `curl`, verified against the checksum published in the update information. There is no telemetry.
 
 A calculated SHA-256 only tells you the file's hash. It is not a statement that the application is safe.
 
-## Not implemented
+## Limitations
 
-* Showing AppImages discovered in `~/Applications` or the download folder. The scanner exists (`AppImageScanner`) but is not wired into the interface.
-* Updating AppImages (a new version is added as a separate entry; there is no update checker, replacement or rollback workflow).
-* A command-line interface for managing AppImages (`appnest [FILE...]` only opens files in the window).
-* Separate switches for the menu entry and the desktop shortcut: they are created and removed together.
+* Updating downloads the complete new AppImage; the zsync delta-transfer method is not implemented. Applications without embedded update information cannot be checked automatically, but can be replaced manually.
+* Embedded AppImage signatures (`.sig_key` sections) are not verified. Updates prove the download matches what the publisher's update metadata announced, nothing more.
+* Scan folders are searched with Refresh or at startup, not continuously.
 
 ## Installation
 
 | Distribution | Status |
 |---|---|
 | Fedora | Submitted for review to the official repositories; **not yet available through `dnf` from Fedora**. A Copr project (`kailaz/appnest`) is used for test builds. |
+| Debian/Ubuntu | Debian packaging in `debian/` builds against the distribution's own Rust crates. **Not yet in the official archives** — see [Packaging](#packaging). |
 | Arch Linux | AUR package `appnest` (`packaging/aur`). |
 | Others | Build from source. |
 
 ### Requirements
 
 * Rust 1.92 or newer (build only)
-* GTK 4.6+ and libadwaita 1.5+
+* GTK 4.10+ and libadwaita 1.5+
 * `7z` (the `7zip` package) for reading metadata, icons and extracting AppDirs
+* `curl` for update checks and downloads
 * Optional: `update-desktop-database` (`desktop-file-utils`) to refresh the desktop database right away
 
 ### Build and run
@@ -68,11 +72,26 @@ A calculated SHA-256 only tells you the file's hash. It is not a statement that 
 # Fedora
 sudo dnf install cargo gtk4-devel libadwaita-devel 7zip
 # Debian/Ubuntu 24.04
-sudo apt install cargo libgtk-4-dev libadwaita-1-dev p7zip-full
+sudo apt install cargo libgtk-4-dev libadwaita-1-dev 7zip
 
 cargo build --release --locked
 ./target/release/appnest
 ```
+
+### Command-line usage
+
+```
+appnest list                     # what's in the library, ready/running/missing
+appnest import ./Tool.AppImage   # add it (--no-copy / --no-menu / --no-shortcut)
+appnest launch tool              # start it (arguments after -- go to the app)
+appnest update -y tool           # download and install a published update
+appnest replace tool ./Tool-2.AppImage   # swap in a newer file manually
+appnest run ./Other.AppImage     # run once, without adding
+appnest scan                     # AppImages found in the scan folders
+appnest remove -y tool           # remove (--delete-file drops the copy too)
+```
+
+Exit status is 0 on success, 1 on failure, 2 for usage errors, so the commands can be scripted. All commands work without a display server. See the man page for the full reference.
 
 ### Tests
 
@@ -91,15 +110,15 @@ $XDG_DATA_HOME/appnest/          (default ~/.local/share/appnest/)
 ├── icons/
 └── apps.toml                    # Library database (+ .bak backup)
 $XDG_DATA_HOME/applications/     # Menu entries: appnest-<id>.desktop
-$XDG_CONFIG_HOME/appnest/        # config.toml
-$XDG_CACHE_HOME/appnest/         # Launch logs
+$XDG_CONFIG_HOME/appnest/        # config.toml (incl. scan folders)
+$XDG_CACHE_HOME/appnest/         # Launch logs, downloaded updates
 ```
 
 Desktop shortcuts go to the XDG desktop directory.
 
 ## Troubleshooting
 
-* **"7-Zip is not installed"**: install the `7zip` package (`p7zip-full` on Debian/Ubuntu).
+* **"7-Zip is not installed"**: install the `7zip` package (`7zip` on Debian/Ubuntu).
 * **An AppImage will not start**: the error message shows the program's output. If it mentions FUSE, choose *Extract and run* or *Extracted AppRun* for that application.
 * **"File missing"** on an entry: the AppImage was moved or deleted. Restore the file and refresh, or remove the entry.
 * **"Cannot use ...: Not an AppImage"**: the file lacks the AppImage signature or embedded filesystem, or is for an unsupported CPU architecture.
@@ -109,7 +128,8 @@ Desktop shortcuts go to the XDG desktop directory.
 ```text
 src/domain/          models and the repository trait
 src/application/     commands (import, launch, close, remove, update, migrate) and queries
-src/services/        validator, extractor, importer, launcher, scanner, desktop entries
+src/services/        validator, extractor, importer, launcher, scanner, updater, desktop entries
+src/cli.rs           command-line interface (no GTK)
 src/infrastructure/  filesystem, hashing, process handling, TOML repository, settings
 src/ui/              GTK4 / Libadwaita widgets
 ```
@@ -124,6 +144,22 @@ The Fedora spec (`packaging/rpm/appnest.spec`) follows the Fedora Rust guideline
 desktop-file-validate packaging/io.github._1kailas.AppNest.desktop
 appstreamcli validate --no-net resources/io.github._1kailas.AppNest.metainfo.xml
 ```
+
+### Debian / Ubuntu (apt)
+
+Debian packaging lives in `debian/` and builds against the distribution's own
+packaged Rust crates (no vendored or downloaded dependencies):
+
+```bash
+sudo apt install debhelper dh-cargo rustc cargo libgtk-4-dev libadwaita-1-dev \
+  librust-gtk4-dev librust-libadwaita-dev # + the crates in debian/control
+dpkg-buildpackage -us -uc -b
+```
+
+This currently requires Debian unstable/testing or a release whose gtk-rs crates
+are new enough (libadwaita-rs 0.9+). Ubuntu 24.04 LTS is too old; build from
+source there instead. AppNest is **not yet in the official Debian or Ubuntu
+archives**; inclusion would need a Debian maintainer to adopt the package.
 
 ## Contributing
 

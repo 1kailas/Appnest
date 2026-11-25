@@ -7,6 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
+use std::time::SystemTime;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct DatabaseFile {
@@ -42,9 +43,18 @@ impl Drop for FileLock {
     }
 }
 
+/// Size and modification time of the database file, used to notice changes made by another
+/// process (for example the command-line interface while the window is open).
+type Stamp = Option<(SystemTime, u64)>;
+
+struct Cached {
+    stamp: Stamp,
+    apps: Vec<AppImage>,
+}
+
 pub struct FilesystemAppImageRepository {
     paths: AppPaths,
-    cache: RwLock<Option<Vec<AppImage>>>,
+    cache: RwLock<Option<Cached>>,
     write_lock: Mutex<()>,
 }
 
@@ -55,6 +65,11 @@ impl FilesystemAppImageRepository {
             cache: RwLock::new(None),
             write_lock: Mutex::new(()),
         }
+    }
+
+    fn stamp(&self) -> Stamp {
+        let meta = fs::metadata(&self.paths.database_file).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
     }
 
     fn sidecar(&self, suffix: &str) -> PathBuf {
@@ -161,7 +176,10 @@ impl FilesystemAppImageRepository {
         let (result, changed) = f(&mut apps);
         if changed {
             self.write_to_disk(&apps)?;
-            *self.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(apps);
+            *self.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(Cached {
+                stamp: self.stamp(),
+                apps,
+            });
         }
         Ok(result)
     }
@@ -175,12 +193,17 @@ impl AppImageRepository for FilesystemAppImageRepository {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            return Ok(cached.clone());
+            if cached.stamp == self.stamp() {
+                return Ok(cached.apps.clone());
+            }
         }
 
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let apps = self.read_from_disk()?;
-        *self.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(apps.clone());
+        *self.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(Cached {
+            stamp: self.stamp(),
+            apps: apps.clone(),
+        });
         Ok(apps)
     }
 

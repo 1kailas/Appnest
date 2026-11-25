@@ -11,9 +11,11 @@
       organizing, integrating, and launching AppImages.
     </p>
     <p>
-      Key features include an adaptive runtime execution engine (Direct Native, FUSE,
-      and SquashFS Extracted fallback), drag-and-drop file import, SHA-256 checksum
-      verification, and full GNOME Libadwaita desktop integration.
+      Key features include an adaptive runtime execution engine (direct execution,
+      extract-and-run without FUSE, and running the extracted AppRun), discovery of
+      unmanaged AppImages, update checks using the update information embedded in
+      AppImages, drag-and-drop file import, SHA-256 checksum verification, a full
+      command-line interface, and GNOME Libadwaita desktop integration.
     </p>
   </description>
   <launchable type="desktop-id">io.github._1kailas.AppNest.desktop</launchable>
@@ -28,6 +30,12 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.4.0" date="2026-11-25">
+      <description>
+        <p>Update checks and downloads using the zsync update information embedded in AppImages, with checksum verification of every download.</p>
+        <p>A full command-line interface (list, info, import, launch, run, remove, scan, check-update, update, replace). Application menu entries and desktop shortcuts are now independent, and menu entries launch through AppNest so every entry point shares failure detection and runtime fallbacks. AppImages found in configurable scan folders are offered for import, and an application can be replaced with a newer AppImage file.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-11-25">
       <description>
         <p>Security and reliability release. AppImages are fully validated before use, extraction is isolated and checked, desktop entries are escaped and namespaced, and the application database is transactional and recovers from corruption.</p>

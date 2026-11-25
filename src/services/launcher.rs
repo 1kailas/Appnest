@@ -171,7 +171,7 @@ impl AppImageLauncher {
 
     fn run_native(&self, app: &AppImage, args: &[OsString]) -> Result<Attempt, AppImageError> {
         let _ = FileSystem::make_executable(&app.path);
-        Ok(self.attempt(app, &app.path, args, Vec::new()))
+        Ok(self.attempt(app, &app.path, args, Self::identifying_env(app)))
     }
 
     fn run_extract_and_run(
@@ -182,7 +182,7 @@ impl AppImageLauncher {
         let _ = FileSystem::make_executable(&app.path);
         let mut full = vec![OsString::from("--appimage-extract-and-run")];
         full.extend(args.iter().cloned());
-        Ok(self.attempt(app, &app.path, &full, Vec::new()))
+        Ok(self.attempt(app, &app.path, &full, Self::identifying_env(app)))
     }
 
     fn run_extracted(
@@ -193,14 +193,21 @@ impl AppImageLauncher {
         let dir = self.ensure_extracted(app, true)?;
         let apprun = dir.join("AppRun");
         let _ = FileSystem::make_executable(&apprun);
-        let env = vec![
-            (OsString::from("APPDIR"), dir.into_os_string()),
-            (
-                OsString::from("APPIMAGE"),
-                app.path.clone().into_os_string(),
-            ),
-        ];
+        let mut env = vec![(OsString::from("APPDIR"), dir.into_os_string())];
+        env.extend(Self::identifying_env(app));
         Ok(self.attempt(app, &apprun, args, env))
+    }
+
+    /// The `APPIMAGE` variable identifies which AppImage a process belongs to, so instances
+    /// can be found again in `/proc` even after the program re-executes into something else.
+    /// A real AppImage runtime also sets this variable itself for the same purpose.
+    fn identifying_env(app: &AppImage) -> Vec<(OsString, OsString)> {
+        vec![(
+            OsString::from("APPIMAGE"),
+            std::fs::canonicalize(&app.path)
+                .unwrap_or_else(|_| app.path.clone())
+                .into_os_string(),
+        )]
     }
 
     /// Starts one process and watches it for the early-exit window. A process that is still

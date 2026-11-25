@@ -8,6 +8,7 @@ pub struct AppRowWidget {
     pub launch_button: Button,
     pub running_badge: Label,
     pub app_id: String,
+    name: String,
     pub is_running: Cell<bool>,
 }
 
@@ -107,6 +108,10 @@ impl AppRowWidget {
         launch_button.add_css_class("flat");
         launch_button.add_css_class("circular");
         launch_button.set_sensitive(app.exists());
+        launch_button.update_property(&[gtk4::accessible::Property::Label(&format!(
+            "Launch {}",
+            app.name
+        ))]);
         trailing_box.append(&launch_button);
 
         main_box.append(&trailing_box);
@@ -117,6 +122,7 @@ impl AppRowWidget {
             launch_button,
             running_badge,
             app_id: app.id.clone(),
+            name: app.name.clone(),
             is_running: Cell::new(false),
         }
     }
@@ -131,6 +137,11 @@ impl AppRowWidget {
             self.launch_button.set_icon_name("window-close-symbolic");
             self.launch_button
                 .set_tooltip_text(Some("Close Application"));
+            self.launch_button
+                .update_property(&[gtk4::accessible::Property::Label(&format!(
+                    "Close {}",
+                    self.name
+                ))]);
             self.launch_button.remove_css_class("flat");
             self.launch_button.add_css_class("destructive-action");
         } else {
@@ -138,6 +149,11 @@ impl AppRowWidget {
                 .set_icon_name("media-playback-start-symbolic");
             self.launch_button
                 .set_tooltip_text(Some("Launch Application"));
+            self.launch_button
+                .update_property(&[gtk4::accessible::Property::Label(&format!(
+                    "Launch {}",
+                    self.name
+                ))]);
             self.launch_button.remove_css_class("destructive-action");
             self.launch_button.add_css_class("flat");
         }
