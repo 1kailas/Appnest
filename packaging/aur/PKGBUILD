@@ -19,7 +19,7 @@ makedepends=(
 	'cargo'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('f3b163b05ce851c242fed86b17213e562de2494298b216dde251a81ea2c38cf4')
 
 prepare() {
 	cd "Appnest-$pkgver"

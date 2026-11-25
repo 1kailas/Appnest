@@ -15,6 +15,6 @@ pkgbase = appnest
 	depends = 7zip
 	depends = curl
 	source = appnest-0.3.0.tar.gz::https://github.com/1kailas/Appnest/archive/refs/tags/v0.3.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = f3b163b05ce851c242fed86b17213e562de2494298b216dde251a81ea2c38cf4
 
 pkgname = appnest
